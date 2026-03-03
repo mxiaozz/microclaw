@@ -304,6 +304,18 @@ fn slack_external_chat_id(channel: &str, thread_ts: Option<&str>) -> String {
     }
 }
 
+fn split_slack_external_chat_id(external_chat_id: &str) -> (&str, Option<&str>) {
+    let normalized = external_chat_id.trim();
+    if let Some((channel, thread_ts)) = normalized.split_once(':') {
+        let channel = channel.trim();
+        let thread_ts = thread_ts.trim();
+        if !channel.is_empty() && !thread_ts.is_empty() {
+            return (channel, Some(thread_ts));
+        }
+    }
+    (normalized, None)
+}
+
 fn slack_chat_title(channel: &str, thread_ts: Option<&str>) -> String {
     match normalize_slack_thread_ts(thread_ts) {
         Some(thread_ts) => format!("slack-{channel}-thread-{thread_ts}"),
@@ -343,11 +355,18 @@ impl ChannelAdapter for SlackAdapter {
     }
 
     async fn send_text(&self, external_chat_id: &str, text: &str) -> Result<(), String> {
+        let (channel, thread_ts) = split_slack_external_chat_id(external_chat_id);
+        if channel.is_empty() {
+            return Err("Invalid Slack external_chat_id: empty channel".to_string());
+        }
         for chunk in split_text(text, 4000) {
-            let body = serde_json::json!({
-                "channel": external_chat_id,
+            let mut body = serde_json::json!({
+                "channel": channel,
                 "text": chunk,
             });
+            if let Some(ts) = thread_ts {
+                body["thread_ts"] = serde_json::Value::String(ts.to_string());
+            }
             let resp = self
                 .http_client
                 .post("https://slack.com/api/chat.postMessage")
@@ -391,6 +410,10 @@ impl ChannelAdapter for SlackAdapter {
         file_path: &Path,
         caption: Option<&str>,
     ) -> Result<String, String> {
+        let (channel, thread_ts) = split_slack_external_chat_id(external_chat_id);
+        if channel.is_empty() {
+            return Err("Invalid Slack external_chat_id: empty channel".to_string());
+        }
         let filename = file_path
             .file_name()
             .and_then(|v| v.to_str())
@@ -400,13 +423,16 @@ impl ChannelAdapter for SlackAdapter {
             .await
             .map_err(|e| format!("Failed to read attachment file: {e}"))?;
 
-        let form = reqwest::multipart::Form::new()
-            .text("channels", external_chat_id.to_string())
+        let mut form = reqwest::multipart::Form::new()
+            .text("channels", channel.to_string())
             .text("initial_comment", caption.unwrap_or_default().to_string())
             .part(
                 "file",
                 reqwest::multipart::Part::bytes(bytes).file_name(filename),
             );
+        if let Some(ts) = thread_ts {
+            form = form.text("thread_ts", ts.to_string());
+        }
 
         let resp = self
             .http_client
@@ -1029,6 +1055,15 @@ commands:
     fn test_slack_chat_id_and_title_ignore_blank_thread_ts() {
         assert_eq!(slack_external_chat_id("D123", Some("   ")), "D123");
         assert_eq!(slack_chat_title("D123", Some("   ")), "slack-D123");
+    }
+
+    #[test]
+    fn test_split_slack_external_chat_id() {
+        assert_eq!(
+            split_slack_external_chat_id("D123:1740659112.001200"),
+            ("D123", Some("1740659112.001200"))
+        );
+        assert_eq!(split_slack_external_chat_id("D123"), ("D123", None));
     }
 
     #[test]
