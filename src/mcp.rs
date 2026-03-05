@@ -3,14 +3,19 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
-use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, Command};
-use tokio::sync::{Mutex, Semaphore};
+use rmcp::ServiceExt;
+use rmcp::model::{CallToolRequestParams, RawContent};
+use rmcp::transport::TokioChildProcess;
+use rmcp::transport::child_process::ConfigureCommandExt;
+use rmcp::transport::streamable_http_client::{
+    StreamableHttpClientTransport, StreamableHttpClientTransportConfig,
+};
+use http::{HeaderName, HeaderValue};
+use serde::Deserialize;
+use tokio::process::Command;
+use tokio::sync::Semaphore;
 use tracing::{error, info, warn};
 
-const DEFAULT_PROTOCOL_VERSION: &str = "2024-11-05";
-const DEFAULT_MAX_RETRIES: u32 = 2;
 const DEFAULT_HEALTH_INTERVAL_SECS: u64 = 60;
 const TOOLS_CACHE_TTL_SECS: u64 = 300;
 const DEFAULT_CIRCUIT_BREAKER_FAILURE_THRESHOLD: u32 = 5;
@@ -18,34 +23,6 @@ const DEFAULT_CIRCUIT_BREAKER_COOLDOWN_SECS: u64 = 30;
 const DEFAULT_MAX_CONCURRENT_REQUESTS: u32 = 4;
 const DEFAULT_QUEUE_WAIT_MS: u64 = 200;
 const DEFAULT_RATE_LIMIT_PER_MINUTE: u32 = 120;
-
-// --- JSON-RPC 2.0 types ---
-
-#[derive(Debug, Serialize)]
-struct JsonRpcRequest {
-    jsonrpc: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    id: Option<u64>,
-    method: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    params: Option<serde_json::Value>,
-}
-
-#[derive(Debug, Deserialize)]
-struct JsonRpcResponse {
-    #[allow(dead_code)]
-    jsonrpc: Option<String>,
-    #[allow(dead_code)]
-    id: Option<serde_json::Value>,
-    result: Option<serde_json::Value>,
-    error: Option<JsonRpcError>,
-}
-
-#[derive(Debug, Deserialize)]
-struct JsonRpcError {
-    code: i64,
-    message: String,
-}
 
 // --- MCP config types ---
 
@@ -116,34 +93,7 @@ pub struct McpToolInfo {
     pub input_schema: serde_json::Value,
 }
 
-#[derive(Clone)]
-struct McpStdioSpawnSpec {
-    command: String,
-    args: Vec<String>,
-    env: HashMap<String, String>,
-}
-
-// --- MCP server connection ---
-
-struct McpStdioInner {
-    stdin: tokio::process::ChildStdin,
-    stdout: BufReader<tokio::process::ChildStdout>,
-    _child: Child,
-    next_id: u64,
-}
-
-struct McpHttpInner {
-    client: reqwest::Client,
-    endpoint: String,
-    headers: HashMap<String, String>,
-    next_id: u64,
-    session_id: Option<String>,
-}
-
-enum McpTransport {
-    Stdio(Box<Mutex<McpStdioInner>>),
-    StreamableHttp(Box<Mutex<McpHttpInner>>),
-}
+// --- Resilience primitives (unchanged from before) ---
 
 #[derive(Debug)]
 struct CircuitBreakerState {
@@ -233,14 +183,27 @@ impl FixedWindowRateLimiter {
     }
 }
 
+// --- rmcp peer wrapper ---
+
+enum McpPeer {
+    Stdio(rmcp::service::RunningService<rmcp::RoleClient, ()>),
+    Http(rmcp::service::RunningService<rmcp::RoleClient, ()>),
+}
+
+impl McpPeer {
+    fn peer(&self) -> &rmcp::Peer<rmcp::RoleClient> {
+        match self {
+            McpPeer::Stdio(s) => s.peer(),
+            McpPeer::Http(s) => s.peer(),
+        }
+    }
+}
+
+// --- MCP server connection ---
+
 pub struct McpServer {
     name: String,
-    requested_protocol: String,
-    negotiated_protocol: StdMutex<String>,
-    request_timeout: Duration,
-    max_retries: u32,
-    transport: McpTransport,
-    stdio_spawn: Option<McpStdioSpawnSpec>,
+    peer: McpPeer,
     tools_cache: StdMutex<Vec<McpToolInfo>>,
     tools_cache_updated_at: StdMutex<Option<Instant>>,
     circuit_breaker: StdMutex<CircuitBreakerState>,
@@ -249,94 +212,17 @@ pub struct McpServer {
     rate_limiter: StdMutex<FixedWindowRateLimiter>,
 }
 
-/// Resolve a command name to its full path. On Windows, also checks for
-/// `.cmd` and `.exe` variants in common locations when PATH lookup fails.
-fn resolve_command(command: &str) -> String {
-    // Already a full path — use as-is
-    if std::path::Path::new(command).is_absolute() {
-        return command.to_string();
-    }
-
-    // Try PATH lookup via `which` (Unix) or `where` (Windows)
-    if let Ok(output) = std::process::Command::new(if cfg!(windows) { "where" } else { "which" })
-        .arg(command)
-        .output()
-    {
-        if output.status.success() {
-            let resolved = String::from_utf8_lossy(&output.stdout)
-                .lines()
-                .next()
-                .unwrap_or("")
-                .trim()
-                .to_string();
-            if !resolved.is_empty() {
-                return resolved;
-            }
-        }
-    }
-
-    // Windows fallback: check common locations for .cmd/.exe variants
-    #[cfg(windows)]
-    {
-        let candidates = [
-            format!("C:\\Program Files\\nodejs\\{command}.cmd"),
-            format!("C:\\Program Files\\nodejs\\{command}.exe"),
-            format!("C:\\Program Files\\nodejs\\{command}"),
-        ];
-        for candidate in &candidates {
-            if std::path::Path::new(candidate).exists() {
-                return candidate.clone();
-            }
-        }
-    }
-
-    // Return original and let the OS try
-    command.to_string()
-}
-
-fn spawn_stdio_inner(spec: &McpStdioSpawnSpec, server_name: &str) -> Result<McpStdioInner, String> {
-    let resolved_command = resolve_command(&spec.command);
-    let mut cmd = Command::new(&resolved_command);
-    cmd.args(&spec.args);
-    cmd.envs(&spec.env);
-    cmd.stdin(std::process::Stdio::piped());
-    cmd.stdout(std::process::Stdio::piped());
-    cmd.stderr(std::process::Stdio::null());
-
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| format!("Failed to spawn MCP server '{server_name}': {e}"))?;
-
-    let stdin = child.stdin.take().ok_or("Failed to get stdin")?;
-    let stdout = child.stdout.take().ok_or("Failed to get stdout")?;
-    let stdout = BufReader::new(stdout);
-
-    Ok(McpStdioInner {
-        stdin,
-        stdout,
-        _child: child,
-        next_id: 1,
-    })
-}
-
 impl McpServer {
     pub async fn connect(
         name: &str,
         config: &McpServerConfig,
-        default_protocol_version: Option<&str>,
+        _default_protocol_version: Option<&str>,
         default_request_timeout_secs: u64,
     ) -> Result<Self, String> {
-        let requested_protocol = config
-            .protocol_version
-            .clone()
-            .or_else(|| default_protocol_version.map(|v| v.to_string()))
-            .unwrap_or_else(|| DEFAULT_PROTOCOL_VERSION.to_string());
-
-        let request_timeout = Duration::from_secs(resolve_request_timeout_secs(
+        let _request_timeout = Duration::from_secs(resolve_request_timeout_secs(
             config.request_timeout_secs,
             default_request_timeout_secs,
         ));
-        let max_retries = config.max_retries.unwrap_or(DEFAULT_MAX_RETRIES);
         let circuit_breaker_threshold = config
             .circuit_breaker_failure_threshold
             .unwrap_or(DEFAULT_CIRCUIT_BREAKER_FAILURE_THRESHOLD);
@@ -354,20 +240,27 @@ impl McpServer {
             .unwrap_or(DEFAULT_RATE_LIMIT_PER_MINUTE);
         let transport_name = config.transport.trim().to_ascii_lowercase();
 
-        let (transport, stdio_spawn) = match transport_name.as_str() {
+        let peer = match transport_name.as_str() {
             "stdio" | "" => {
                 if config.command.trim().is_empty() {
                     return Err(format!(
                         "MCP server '{name}' requires `command` when transport=stdio"
                     ));
                 }
-                let spec = McpStdioSpawnSpec {
-                    command: config.command.clone(),
-                    args: config.args.clone(),
-                    env: config.env.clone(),
-                };
-                let inner = spawn_stdio_inner(&spec, name)?;
-                (McpTransport::Stdio(Box::new(Mutex::new(inner))), Some(spec))
+                let resolved = resolve_command(&config.command);
+                let transport = TokioChildProcess::new(
+                    Command::new(&resolved).configure(|cmd| {
+                        cmd.args(&config.args);
+                        cmd.envs(&config.env);
+                        cmd.stderr(std::process::Stdio::null());
+                    }),
+                )
+                .map_err(|e| format!("Failed to spawn MCP server '{name}': {e}"))?;
+
+                let running = ().serve(transport).await.map_err(|e| {
+                    format!("Failed to initialize MCP server '{name}' (stdio): {e}")
+                })?;
+                McpPeer::Stdio(running)
             }
             "streamable_http" | "http" => {
                 if config.endpoint.trim().is_empty() {
@@ -375,22 +268,21 @@ impl McpServer {
                         "MCP server '{name}' requires `endpoint` when transport=streamable_http"
                     ));
                 }
-
-                let client = reqwest::Client::builder()
-                    .timeout(request_timeout)
-                    .build()
-                    .map_err(|e| format!("Failed to build HTTP client for MCP '{name}': {e}"))?;
-
-                (
-                    McpTransport::StreamableHttp(Box::new(Mutex::new(McpHttpInner {
-                        client,
-                        endpoint: config.endpoint.clone(),
-                        headers: config.headers.clone(),
-                        next_id: 1,
-                        session_id: None,
-                    }))),
-                    None,
-                )
+                let mut custom_headers: HashMap<HeaderName, HeaderValue> = HashMap::new();
+                for (k, v) in &config.headers {
+                    let header_name = HeaderName::from_bytes(k.as_bytes())
+                        .map_err(|e| format!("Invalid header name '{k}' for MCP '{name}': {e}"))?;
+                    let header_value = HeaderValue::from_str(v)
+                        .map_err(|e| format!("Invalid header value for '{k}' in MCP '{name}': {e}"))?;
+                    custom_headers.insert(header_name, header_value);
+                }
+                let http_config = StreamableHttpClientTransportConfig::with_uri(config.endpoint.as_str())
+                    .custom_headers(custom_headers);
+                let transport = StreamableHttpClientTransport::from_config(http_config);
+                let running = ().serve(transport).await.map_err(|e| {
+                    format!("Failed to initialize MCP server '{name}' (http): {e}")
+                })?;
+                McpPeer::Http(running)
             }
             other => {
                 return Err(format!(
@@ -401,12 +293,7 @@ impl McpServer {
 
         let server = McpServer {
             name: name.to_string(),
-            requested_protocol: requested_protocol.clone(),
-            negotiated_protocol: StdMutex::new(requested_protocol),
-            request_timeout,
-            max_retries,
-            transport,
-            stdio_spawn,
+            peer,
             tools_cache: StdMutex::new(Vec::new()),
             tools_cache_updated_at: StdMutex::new(None),
             circuit_breaker: StdMutex::new(CircuitBreakerState::new(
@@ -418,7 +305,6 @@ impl McpServer {
             rate_limiter: StdMutex::new(FixedWindowRateLimiter::new(rate_limit_per_minute)),
         };
 
-        server.initialize_connection().await?;
         let _ = server.refresh_tools_cache(true).await?;
 
         Ok(server)
@@ -455,22 +341,6 @@ impl McpServer {
             .clone()
     }
 
-    pub fn protocol_version(&self) -> String {
-        self.negotiated_protocol
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
-    }
-
-    fn should_attempt_reconnect(err: &str) -> bool {
-        let lower = err.to_ascii_lowercase();
-        lower.contains("write error")
-            || lower.contains("read error")
-            || lower.contains("closed connection")
-            || lower.contains("timeout")
-            || lower.contains("broken pipe")
-    }
-
     fn is_tool_not_found_error(err: &str) -> bool {
         let lower = err.to_ascii_lowercase();
         lower.contains("not found")
@@ -490,475 +360,32 @@ impl McpServer {
         *ts = None;
     }
 
-    async fn reconnect_stdio(&self, attempt: u32) -> Result<(), String> {
-        let Some(spec) = self.stdio_spawn.as_ref() else {
-            return Err("No stdio spawn spec available for reconnect".into());
-        };
-
-        let backoff_ms = 200u64.saturating_mul(2u64.saturating_pow(attempt.min(8)));
-        tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
-
-        let new_inner = spawn_stdio_inner(spec, &self.name)?;
-        match &self.transport {
-            McpTransport::Stdio(inner) => {
-                let mut guard = inner.lock().await;
-                *guard = new_inner;
-            }
-            McpTransport::StreamableHttp(_) => {
-                return Err("Reconnect is only supported for stdio transport".into());
-            }
-        }
-
-        self.initialize_stdio_after_spawn().await?;
-        Ok(())
-    }
-
-    async fn send_request_stdio_once(
-        &self,
-        method: &str,
-        params: Option<serde_json::Value>,
-    ) -> Result<serde_json::Value, String> {
-        let inner = match &self.transport {
-            McpTransport::Stdio(inner) => inner,
-            McpTransport::StreamableHttp(_) => {
-                return Err("Internal error: stdio request on http transport".into());
-            }
-        };
-
-        let mut inner = inner.lock().await;
-        let id = inner.next_id;
-        inner.next_id += 1;
-
-        let request = JsonRpcRequest {
-            jsonrpc: "2.0".to_string(),
-            id: Some(id),
-            method: method.to_string(),
-            params,
-        };
-
-        let mut json = serde_json::to_string(&request).map_err(|e| e.to_string())?;
-        json.push('\n');
-
-        inner
-            .stdin
-            .write_all(json.as_bytes())
-            .await
-            .map_err(|e| format!("Write error: {e}"))?;
-        inner
-            .stdin
-            .flush()
-            .await
-            .map_err(|e| format!("Flush error: {e}"))?;
-
-        let mut line = String::new();
-        let deadline = tokio::time::Instant::now() + self.request_timeout;
-
-        loop {
-            line.clear();
-            let read_result =
-                tokio::time::timeout_at(deadline, inner.stdout.read_line(&mut line)).await;
-
-            match read_result {
-                Err(_) => {
-                    return Err(format!(
-                        "MCP server response timeout ({:?})",
-                        self.request_timeout
-                    ))
-                }
-                Ok(Err(e)) => return Err(format!("Read error: {e}")),
-                Ok(Ok(0)) => return Err("MCP server closed connection".into()),
-                Ok(Ok(_)) => {}
-            }
-
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
-
-            if let Ok(response) = serde_json::from_str::<JsonRpcResponse>(trimmed) {
-                let is_response = match &response.id {
-                    Some(serde_json::Value::Number(n)) => n.as_u64() == Some(id),
-                    _ => response.result.is_some() || response.error.is_some(),
-                };
-                if !is_response {
-                    continue;
-                }
-                if let Some(err) = response.error {
-                    return Err(format!("MCP error ({}): {}", err.code, err.message));
-                }
-                return Ok(response.result.unwrap_or(serde_json::Value::Null));
-            }
-        }
-    }
-
-    async fn send_notification_stdio_once(
-        &self,
-        method: &str,
-        params: Option<serde_json::Value>,
-    ) -> Result<(), String> {
-        let inner = match &self.transport {
-            McpTransport::Stdio(inner) => inner,
-            McpTransport::StreamableHttp(_) => {
-                return Err("Internal error: stdio notification on http transport".into());
-            }
-        };
-
-        let mut inner = inner.lock().await;
-        let request = JsonRpcRequest {
-            jsonrpc: "2.0".to_string(),
-            id: None,
-            method: method.to_string(),
-            params,
-        };
-        let mut json = serde_json::to_string(&request).map_err(|e| e.to_string())?;
-        json.push('\n');
-        inner
-            .stdin
-            .write_all(json.as_bytes())
-            .await
-            .map_err(|e| format!("Write error: {e}"))?;
-        inner
-            .stdin
-            .flush()
-            .await
-            .map_err(|e| format!("Flush error: {e}"))?;
-        Ok(())
-    }
-
-    async fn initialize_stdio_after_spawn(&self) -> Result<(), String> {
-        let params = serde_json::json!({
-            "protocolVersion": self.requested_protocol,
-            "capabilities": {},
-            "clientInfo": {
-                "name": "microclaw",
-                "version": env!("CARGO_PKG_VERSION")
-            }
-        });
-
-        let result = self
-            .send_request_stdio_once("initialize", Some(params))
-            .await?;
-        let negotiated = result
-            .get("protocolVersion")
-            .and_then(|v| v.as_str())
-            .unwrap_or(&self.requested_protocol)
-            .to_string();
-
-        {
-            let mut guard = self
-                .negotiated_protocol
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            *guard = negotiated;
-        }
-
-        self.send_notification_stdio_once("notifications/initialized", None)
-            .await?;
-        Ok(())
-    }
-
-    async fn send_request_stdio_with_retries(
-        &self,
-        method: &str,
-        params: Option<serde_json::Value>,
-    ) -> Result<serde_json::Value, String> {
-        let mut last_err: Option<String> = None;
-
-        for attempt in 0..=self.max_retries {
-            match self.send_request_stdio_once(method, params.clone()).await {
-                Ok(result) => return Ok(result),
-                Err(err) => {
-                    last_err = Some(err.clone());
-                    if attempt >= self.max_retries
-                        || self.stdio_spawn.is_none()
-                        || !Self::should_attempt_reconnect(&err)
-                    {
-                        break;
-                    }
-
-                    warn!(
-                        "MCP server '{}' request failed (attempt {}): {}. Reconnecting...",
-                        self.name,
-                        attempt + 1,
-                        err
-                    );
-                    if let Err(reconnect_err) = self.reconnect_stdio(attempt).await {
-                        return Err(format!(
-                            "{err}; reconnect failed for '{}': {reconnect_err}",
-                            self.name
-                        ));
-                    }
-                }
-            }
-        }
-
-        Err(last_err.unwrap_or_else(|| "Unknown MCP stdio error".to_string()))
-    }
-
-    async fn send_request_http(
-        &self,
-        method: &str,
-        params: Option<serde_json::Value>,
-    ) -> Result<serde_json::Value, String> {
-        let inner = match &self.transport {
-            McpTransport::StreamableHttp(inner) => inner,
-            McpTransport::Stdio(_) => {
-                return Err("Internal error: http request on stdio transport".into());
-            }
-        };
-
-        let mut inner = inner.lock().await;
-        let id = inner.next_id;
-        inner.next_id += 1;
-
-        let request = JsonRpcRequest {
-            jsonrpc: "2.0".to_string(),
-            id: Some(id),
-            method: method.to_string(),
-            params,
-        };
-
-        let mut req = inner
-            .client
-            .post(&inner.endpoint)
-            .json(&request)
-            .header("accept", "application/json, text/event-stream")
-            .header("mcp-protocol-version", self.protocol_version());
-        if let Some(ref sid) = inner.session_id {
-            req = req.header("mcp-session-id", sid);
-        }
-        for (k, v) in &inner.headers {
-            req = req.header(k, v);
-        }
-
-        let response = req
-            .send()
-            .await
-            .map_err(|e| format!("HTTP request failed: {e}"))?;
-        let status = response.status();
-        if let Some(sid) = response.headers().get("mcp-session-id") {
-            if let Ok(sid_str) = sid.to_str() {
-                inner.session_id = Some(sid_str.to_string());
-            }
-        }
-        let text = response
-            .text()
-            .await
-            .map_err(|e| format!("Failed to read HTTP MCP response body: {e}"))?;
-        tracing::debug!("HTTP MCP raw response ({}): {}", status, text);
-        let json_str = if text.starts_with("data:") || text.contains("\ndata:") {
-            text.lines()
-                .find(|l| l.starts_with("data:"))
-                .map(|l| l["data:".len()..].trim().to_string())
-                .unwrap_or(text)
-        } else {
-            text
-        };
-        let body: serde_json::Value = serde_json::from_str(&json_str)
-            .map_err(|e| format!("Failed to parse HTTP MCP response: {e}"))?;
-
-        if !status.is_success() {
-            return Err(format!("HTTP MCP request failed with {status}: {body}"));
-        }
-
-        if let Ok(parsed) = serde_json::from_value::<JsonRpcResponse>(body.clone()) {
-            if let Some(err) = parsed.error {
-                return Err(format!("MCP error ({}): {}", err.code, err.message));
-            }
-            return Ok(parsed.result.unwrap_or(serde_json::Value::Null));
-        }
-
-        if let Some(result) = body.get("result") {
-            return Ok(result.clone());
-        }
-
-        Ok(body)
-    }
-
-    async fn send_request(
-        &self,
-        method: &str,
-        params: Option<serde_json::Value>,
-    ) -> Result<serde_json::Value, String> {
-        {
-            let mut rate = self.rate_limiter.lock().unwrap_or_else(|e| e.into_inner());
-            if let Err(retry_after_secs) = rate.consume_or_retry_after_secs(Instant::now()) {
-                return Err(format!(
-                    "MCP server '{}' rate-limited; retry in ~{}s",
-                    self.name, retry_after_secs
-                ));
-            }
-        }
-
-        let permit = tokio::time::timeout(
-            self.queue_wait,
-            self.inflight_limiter.clone().acquire_owned(),
-        )
-        .await
-        .map_err(|_| {
-            format!(
-                "MCP server '{}' busy; exceeded queue wait of {:?}",
-                self.name, self.queue_wait
-            )
-        })?
-        .map_err(|_| format!("MCP server '{}' limiter is closed", self.name))?;
-
-        let now = Instant::now();
-        {
-            let mut breaker = self
-                .circuit_breaker
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            if let Err(remaining_secs) = breaker.check_ready(now) {
-                return Err(format!(
-                    "MCP server '{}' circuit open; retry in ~{}s",
-                    self.name, remaining_secs
-                ));
-            }
-        }
-
-        let result = match &self.transport {
-            McpTransport::Stdio(_) => self.send_request_stdio_with_retries(method, params).await,
-            McpTransport::StreamableHttp(_) => self.send_request_http(method, params).await,
-        };
-        drop(permit);
-
-        let mut breaker = self
-            .circuit_breaker
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        match &result {
-            Ok(_) => breaker.record_success(),
-            Err(_) => {
-                if breaker.record_failure(Instant::now()) {
-                    warn!(
-                        "MCP server '{}' circuit opened after consecutive failures",
-                        self.name
-                    );
-                }
-            }
-        }
-
-        result
-    }
-
-    async fn send_notification(
-        &self,
-        method: &str,
-        params: Option<serde_json::Value>,
-    ) -> Result<(), String> {
-        match &self.transport {
-            McpTransport::Stdio(_) => self.send_notification_stdio_once(method, params).await,
-            McpTransport::StreamableHttp(inner) => {
-                let inner = inner.lock().await;
-                let request = JsonRpcRequest {
-                    jsonrpc: "2.0".to_string(),
-                    id: None,
-                    method: method.to_string(),
-                    params,
-                };
-
-                let mut req = inner
-                    .client
-                    .post(&inner.endpoint)
-                    .json(&request)
-                    .header("accept", "application/json, text/event-stream")
-                    .header("mcp-protocol-version", self.protocol_version());
-                if let Some(ref sid) = inner.session_id {
-                    req = req.header("mcp-session-id", sid);
-                }
-                for (k, v) in &inner.headers {
-                    req = req.header(k, v);
-                }
-
-                let response = req
-                    .send()
-                    .await
-                    .map_err(|e| format!("HTTP notification failed: {e}"))?;
-                let notif_status = response.status();
-                let notif_body = response.text().await.unwrap_or_default();
-                tracing::debug!("HTTP MCP notification response ({}): {}", notif_status, notif_body);
-                if notif_status.is_success() {
-                    Ok(())
-                } else {
-                    Err(format!(
-                        "HTTP notification failed with status {}: {}",
-                        notif_status, notif_body
-                    ))
-                }
-            }
-        }
-    }
-
-    async fn initialize_connection(&self) -> Result<(), String> {
-        let params = serde_json::json!({
-            "protocolVersion": self.requested_protocol,
-            "capabilities": {},
-            "clientInfo": {
-                "name": "microclaw",
-                "version": env!("CARGO_PKG_VERSION")
-            }
-        });
-
-        let result = self.send_request("initialize", Some(params)).await?;
-        let negotiated = result
-            .get("protocolVersion")
-            .and_then(|v| v.as_str())
-            .unwrap_or(&self.requested_protocol)
-            .to_string();
-
-        {
-            let mut guard = self
-                .negotiated_protocol
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            if negotiated != self.requested_protocol {
-                info!(
-                    "MCP server '{}' negotiated protocol {} (requested {})",
-                    self.name, negotiated, self.requested_protocol
-                );
-            }
-            *guard = negotiated;
-        }
-
-        self.send_notification("notifications/initialized", None)
-            .await?;
-
-        Ok(())
-    }
-
     async fn list_tools_uncached(&self) -> Result<Vec<McpToolInfo>, String> {
-        let result = self
-            .send_request("tools/list", Some(serde_json::json!({})))
-            .await?;
+        let rmcp_tools = self
+            .peer
+            .peer()
+            .list_all_tools()
+            .await
+            .map_err(|e| format!("Failed to list tools for '{}': {e}", self.name))?;
 
-        let tools_value = result.get("tools").ok_or("No tools in response")?;
-        let tools_array = tools_value.as_array().ok_or("tools is not an array")?;
-
-        let mut tools = Vec::new();
-        for tool in tools_array {
-            let name = tool
-                .get("name")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            let description = tool
-                .get("description")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            let input_schema = tool
-                .get("inputSchema")
-                .cloned()
-                .unwrap_or_else(|| serde_json::json!({"type": "object", "properties": {}}));
-
-            tools.push(McpToolInfo {
-                server_name: self.name.clone(),
-                name,
-                description,
-                input_schema,
-            });
-        }
+        let tools = rmcp_tools
+            .into_iter()
+            .map(|t| {
+                let input_schema =
+                    serde_json::to_value(&*t.input_schema).unwrap_or_else(|_| {
+                        serde_json::json!({"type": "object", "properties": {}})
+                    });
+                McpToolInfo {
+                    server_name: self.name.clone(),
+                    name: t.name.into_owned(),
+                    description: t
+                        .description
+                        .map(|d| d.into_owned())
+                        .unwrap_or_default(),
+                    input_schema,
+                }
+            })
+            .collect();
 
         Ok(tools)
     }
@@ -993,62 +420,41 @@ impl McpServer {
         });
     }
 
-    pub async fn call_tool(
+    async fn call_tool_inner(
         &self,
         tool_name: &str,
         arguments: serde_json::Value,
     ) -> Result<String, String> {
-        let snapshot = self.tools_snapshot();
-        if !snapshot.iter().any(|t| t.name == tool_name) {
-            let _ = self.refresh_tools_cache(true).await;
-        } else {
-            let _ = self.refresh_tools_cache(false).await;
-        }
+        let args_map = arguments
+            .as_object()
+            .cloned()
+            .unwrap_or_default();
 
-        let params = serde_json::json!({
-            "name": tool_name,
-            "arguments": arguments
-        });
+        let params = CallToolRequestParams::new(tool_name.to_string()).with_arguments(args_map);
 
-        let result = match self.send_request("tools/call", Some(params)).await {
-            Ok(result) => result,
-            Err(err) => {
-                if Self::is_tool_not_found_error(&err) {
-                    self.invalidate_tools_cache();
-                    let _ = self.refresh_tools_cache(true).await;
+        let result = self
+            .peer
+            .peer()
+            .call_tool(params)
+            .await
+            .map_err(|e| format!("MCP tool call error: {e}"))?;
+
+        let is_error = result.is_error.unwrap_or(false);
+
+        let mut output = String::new();
+        for item in &result.content {
+            if let RawContent::Text(text_content) = &item.raw {
+                if !output.is_empty() {
+                    output.push('\n');
                 }
-                return Err(err);
-            }
-        };
-
-        let is_error = result
-            .get("isError")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-
-        if let Some(content) = result.get("content") {
-            if let Some(array) = content.as_array() {
-                let mut output = String::new();
-                for item in array {
-                    if let Some(text) = item.get("text").and_then(|v| v.as_str()) {
-                        if !output.is_empty() {
-                            output.push('\n');
-                        }
-                        output.push_str(text);
-                    }
-                }
-                if is_error {
-                    if Self::is_tool_not_found_error(&output) {
-                        self.invalidate_tools_cache();
-                        let _ = self.refresh_tools_cache(true).await;
-                    }
-                    return Err(output);
-                }
-                return Ok(output);
+                output.push_str(&text_content.text);
             }
         }
 
-        let output = serde_json::to_string_pretty(&result).unwrap_or_default();
+        if output.is_empty() {
+            output = serde_json::to_string_pretty(&result.content).unwrap_or_default();
+        }
+
         if is_error {
             if Self::is_tool_not_found_error(&output) {
                 self.invalidate_tools_cache();
@@ -1058,6 +464,81 @@ impl McpServer {
         } else {
             Ok(output)
         }
+    }
+
+    pub async fn call_tool(
+        &self,
+        tool_name: &str,
+        arguments: serde_json::Value,
+    ) -> Result<String, String> {
+        // Refresh cache if tool not known, else lazy refresh
+        let snapshot = self.tools_snapshot();
+        if !snapshot.iter().any(|t| t.name == tool_name) {
+            let _ = self.refresh_tools_cache(true).await;
+        } else {
+            let _ = self.refresh_tools_cache(false).await;
+        }
+
+        // Rate limiter
+        {
+            let mut rate = self.rate_limiter.lock().unwrap_or_else(|e| e.into_inner());
+            if let Err(retry_after_secs) = rate.consume_or_retry_after_secs(Instant::now()) {
+                return Err(format!(
+                    "MCP server '{}' rate-limited; retry in ~{}s",
+                    self.name, retry_after_secs
+                ));
+            }
+        }
+
+        // Bulkhead
+        let permit = tokio::time::timeout(
+            self.queue_wait,
+            self.inflight_limiter.clone().acquire_owned(),
+        )
+        .await
+        .map_err(|_| {
+            format!(
+                "MCP server '{}' busy; exceeded queue wait of {:?}",
+                self.name, self.queue_wait
+            )
+        })?
+        .map_err(|_| format!("MCP server '{}' limiter is closed", self.name))?;
+
+        // Circuit breaker check
+        {
+            let mut breaker = self
+                .circuit_breaker
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if let Err(remaining_secs) = breaker.check_ready(Instant::now()) {
+                return Err(format!(
+                    "MCP server '{}' circuit open; retry in ~{}s",
+                    self.name, remaining_secs
+                ));
+            }
+        }
+
+        let result = self.call_tool_inner(tool_name, arguments).await;
+        drop(permit);
+
+        // Update circuit breaker
+        let mut breaker = self
+            .circuit_breaker
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        match &result {
+            Ok(_) => breaker.record_success(),
+            Err(_) => {
+                if breaker.record_failure(Instant::now()) {
+                    warn!(
+                        "MCP server '{}' circuit opened after consecutive failures",
+                        self.name
+                    );
+                }
+            }
+        }
+
+        result
     }
 }
 
@@ -1078,7 +559,6 @@ impl McpManager {
         let (loaded_any_config, merged_default_protocol_version, merged_servers) =
             merge_config_sources(paths);
         if !loaded_any_config {
-            // Config file not found is normal — MCP is optional
             return McpManager {
                 servers: Vec::new(),
             };
@@ -1108,9 +588,8 @@ impl McpManager {
                     server.clone().start_health_probe(interval);
 
                     info!(
-                        "MCP server '{name}' connected ({} tools, protocol {})",
+                        "MCP server '{name}' connected ({} tools)",
                         server.tools_snapshot().len(),
-                        server.protocol_version()
                     );
                     servers.push(server);
                 }
@@ -1185,6 +664,46 @@ fn load_config_from_path(path: &Path) -> Option<McpConfig> {
             None
         }
     }
+}
+
+/// Resolve a command name to its full path.
+fn resolve_command(command: &str) -> String {
+    if std::path::Path::new(command).is_absolute() {
+        return command.to_string();
+    }
+
+    if let Ok(output) = std::process::Command::new(if cfg!(windows) { "where" } else { "which" })
+        .arg(command)
+        .output()
+    {
+        if output.status.success() {
+            let resolved = String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            if !resolved.is_empty() {
+                return resolved;
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        let candidates = [
+            format!("C:\\Program Files\\nodejs\\{command}.cmd"),
+            format!("C:\\Program Files\\nodejs\\{command}.exe"),
+            format!("C:\\Program Files\\nodejs\\{command}"),
+        ];
+        for candidate in &candidates {
+            if std::path::Path::new(candidate).exists() {
+                return candidate.clone();
+            }
+        }
+    }
+
+    command.to_string()
 }
 
 #[cfg(test)]
