@@ -527,6 +527,7 @@ mod tests {
                 accounts: std::collections::HashMap::new(),
                 default_account: None,
                 streaming: crate::channels::telegram::TelegramStreamingConfig::default(),
+                topic_routing: crate::channels::telegram::TelegramTopicRoutingConfig::default(),
             },
         );
         registry.register(Arc::new(tg_adapter));
