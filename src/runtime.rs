@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::anyhow;
 use futures_util::FutureExt;
@@ -441,6 +442,42 @@ pub async fn run(
 
     crate::scheduler::spawn_scheduler(state.clone());
     crate::scheduler::spawn_reflector(state.clone());
+    if state.config.subagents.announce_to_chat {
+        let relay_state = state.clone();
+        spawn_guarded("subagents_announce_relay".to_string(), async move {
+            let interval_secs = relay_state.config.subagents.announce_relay_interval_secs;
+            let first_processed = crate::tools::subagents::flush_pending_announces_once(
+                &relay_state.config,
+                relay_state.channel_registry.clone(),
+                relay_state.db.clone(),
+                50,
+            )
+            .await;
+            if first_processed > 0 {
+                info!(
+                    processed = first_processed,
+                    "Recovered pending subagent announcements on startup"
+                );
+            }
+            let mut ticker = tokio::time::interval(Duration::from_secs(interval_secs));
+            loop {
+                ticker.tick().await;
+                let processed = crate::tools::subagents::flush_pending_announces_once(
+                    &relay_state.config,
+                    relay_state.channel_registry.clone(),
+                    relay_state.db.clone(),
+                    50,
+                )
+                .await;
+                if processed > 0 {
+                    info!(
+                        processed,
+                        "Flushed pending subagent announcements from relay"
+                    );
+                }
+            }
+        });
+    }
 
     let has_discord = !discord_runtimes.is_empty();
     if has_discord {

@@ -22,6 +22,7 @@ use crate::channels::startup_guard::{
 use crate::chat_commands::maybe_handle_plugin_command;
 use crate::chat_commands::{handle_chat_command, is_slash_command, unknown_command_response};
 use crate::runtime::AppState;
+use crate::tools::ToolAuthContext;
 use microclaw_channels::channel::ConversationKind;
 use microclaw_channels::channel_adapter::ChannelAdapter;
 use microclaw_core::text::{floor_char_boundary, split_text};
@@ -485,6 +486,73 @@ impl EventHandler for Handler {
             channel_id,
             text.chars().take(100).collect::<String>()
         );
+
+        if self.app_state.config.subagents.thread_bound_routing_enabled {
+            let focused_run = match call_blocking(self.app_state.db.clone(), move |db| {
+                db.get_subagent_focus(channel_id)
+            })
+            .await
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    warn!(
+                        "Discord focused-run lookup failed for chat {}: {}",
+                        channel_id, e
+                    );
+                    None
+                }
+            };
+            if focused_run.is_some() {
+                let auth = ToolAuthContext {
+                    caller_channel: self.runtime.channel_name.clone(),
+                    caller_chat_id: channel_id,
+                    control_chat_ids: self.app_state.config.control_chat_ids.clone(),
+                    env_files: Vec::new(),
+                };
+                let routed = self
+                    .app_state
+                    .tools
+                    .execute_with_auth(
+                        "subagents_send",
+                        json!({
+                            "message": text,
+                            "chat_id": channel_id
+                        }),
+                        &auth,
+                    )
+                    .await;
+                if !routed.is_error {
+                    let route_ack = serde_json::from_str::<serde_json::Value>(&routed.content)
+                        .ok()
+                        .and_then(|v| {
+                            v.get("run_id")
+                                .and_then(|id| id.as_str())
+                                .map(|id| format!("Routed to focused subagent run `{id}`."))
+                        })
+                        .unwrap_or_else(|| {
+                            "Routed to focused subagent continuation run.".to_string()
+                        });
+                    send_discord_response(&ctx, msg.channel_id, &route_ack).await;
+                    let bot_msg = StoredMessage {
+                        id: uuid::Uuid::new_v4().to_string(),
+                        chat_id: channel_id,
+                        sender_name: self.runtime.bot_username.clone(),
+                        content: route_ack,
+                        is_from_bot: true,
+                        timestamp: chrono::Utc::now().to_rfc3339(),
+                    };
+                    let _ = call_blocking(self.app_state.db.clone(), move |db| {
+                        db.store_message(&bot_msg)
+                    })
+                    .await;
+                    return;
+                }
+                warn!(
+                    "Discord focused subagent routing failed for chat {}: {}",
+                    channel_id, routed.content
+                );
+            }
+        }
 
         // Start typing indicator
         let typing = msg.channel_id.start_typing(&ctx.http);

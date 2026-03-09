@@ -43,7 +43,7 @@ import remarkBreaks from 'remark-breaks'
 import remarkGfm from 'remark-gfm'
 import './styles.css'
 import { SessionSidebar } from './components/session-sidebar'
-import { UsagePanel, type InjectionLogPoint, type MemoryObservability, type ReflectorRunPoint } from './components/usage-panel'
+import { UsagePanel, type InjectionLogPoint, type MemoryObservability, type ReflectorRunPoint, type SubagentObservability } from './components/usage-panel'
 import { SkillsSettings } from './components/skills-settings'
 import { ConfigFieldCard, type ConfigFieldCardProps } from './components/config-field-card'
 import { api, makeHeaders, ApiError } from './lib/api'
@@ -1212,6 +1212,7 @@ function App() {
   const [usageLoading, setUsageLoading] = useState<boolean>(false)
   const [usageReport, setUsageReport] = useState<string>('')
   const [usageMemory, setUsageMemory] = useState<MemoryObservability | null>(null)
+  const [usageSubagents, setUsageSubagents] = useState<SubagentObservability | null>(null)
   const [usageReflectorRuns, setUsageReflectorRuns] = useState<ReflectorRunPoint[]>([])
   const [usageInjectionLogs, setUsageInjectionLogs] = useState<InjectionLogPoint[]>([])
   const [usageError, setUsageError] = useState<string>('')
@@ -1971,6 +1972,7 @@ function App() {
     setUsageError('')
     setUsageReport('')
     setUsageMemory(null)
+    setUsageSubagents(null)
     setUsageReflectorRuns([])
     setUsageInjectionLogs([])
     const hasStoredSession = sessions.some((s) => s.session_key === targetSession)
@@ -2002,6 +2004,10 @@ function App() {
       }>(`/api/memory_observability?${moQuery.toString()}`)
       setUsageReflectorRuns(Array.isArray(series.reflector_runs) ? series.reflector_runs : [])
       setUsageInjectionLogs(Array.isArray(series.injection_logs) ? series.injection_logs : [])
+      const subagents = await api<SubagentObservability>(
+        `/api/subagents/observability?session_key=${encodeURIComponent(resolvedSession)}&scope=chat&limit=40`,
+      )
+      setUsageSubagents(subagents ?? null)
       setUsageOpen(true)
     } catch (e) {
       if (isUnauthorizedError(e)) {
@@ -3750,6 +3756,7 @@ function App() {
           usageError={usageError}
           usageReport={usageReport}
           usageMemory={usageMemory}
+          usageSubagents={usageSubagents}
           reflectorRuns={usageReflectorRuns}
           injectionLogs={usageInjectionLogs}
           onRefreshCurrent={() => void openUsage(sessionKey)}

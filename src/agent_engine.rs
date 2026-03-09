@@ -1200,14 +1200,12 @@ pub(crate) async fn process_with_agent_impl(
                         name,
                         input,
                         thought_signature,
-                    } => {
-                        Some(ContentBlock::ToolUse {
-                            id: id.clone(),
-                            name: name.clone(),
-                            input: input.clone(),
-                            thought_signature: thought_signature.clone(),
-                        })
-                    }
+                    } => Some(ContentBlock::ToolUse {
+                        id: id.clone(),
+                        name: name.clone(),
+                        input: input.clone(),
+                        thought_signature: thought_signature.clone(),
+                    }),
                     ResponseContentBlock::Other => None,
                 })
                 .collect();
@@ -1989,7 +1987,8 @@ You have access to the following capabilities:
 - Schedule tasks (`schedule_task`, `list_scheduled_tasks`, `pause/resume/cancel_scheduled_task`, `get_task_history`)
 - Export chat history to markdown (`export_chat`)
 - Understand images sent by users (they appear as image content blocks)
-- Delegate self-contained sub-tasks to a parallel agent (`sub_agent`)
+- Spawn and manage asynchronous sub-agent runs (`sessions_spawn`, `subagents_list`, `subagents_info`, `subagents_kill`)
+- Run depth-2 orchestration template with structured merge (`subagents_orchestrate`)
 - Activate agent skills (`activate_skill`) for specialized tasks
 - Install skills from repos (`sync_skills`, `clawhub_install`, `clawhub_search`) — use these instead of manually writing SKILL.md files. Skills go in ~/.microclaw/skills/ (or configured skills dir).
 - Plan and track tasks with a todo list (`todo_read`, `todo_write`) — use this to break down complex tasks into steps, track progress, and stay organized
@@ -2015,6 +2014,12 @@ Current runtime time context:
 - current_utc_time: {now_utc}
 
 For complex, multi-step tasks: use todo_write to create a plan first, then execute each step and update the todo list as you go. This helps you stay organized and lets the user see progress.
+
+Depth-2 orchestration template (when nested subagents are enabled):
+- Layer 1 (orchestrator): clarify goal, split into 2-5 independent work packages, and define output contract per package.
+- Layer 2 (workers): call `sessions_spawn` for each package with focused task/context, then track with `subagents_list` + `subagents_info`.
+- Merge: synthesize worker outputs, resolve conflicts, and present one concise final answer with assumptions and next actions.
+- Guardrails: keep fanout bounded, avoid recursive spawning beyond configured depth, and cancel stale runs with `subagents_kill`.
 
 When using memory tools:
 - Use 'chat' scope for chat-specific memories

@@ -11,7 +11,7 @@ pub mod read_file;
 pub mod schedule;
 pub mod send_message;
 pub mod structured_memory;
-pub mod sub_agent;
+pub mod subagents;
 pub mod sync_skills;
 pub mod time_math;
 pub mod todo;
@@ -47,7 +47,20 @@ impl ToolRegistry {
     fn should_inject_default_chat_id(tool_name: &str) -> bool {
         matches!(
             tool_name,
-            "write_memory" | "read_memory" | "todo_read" | "todo_write" | "send_message"
+            "write_memory"
+                | "read_memory"
+                | "todo_read"
+                | "todo_write"
+                | "send_message"
+                | "sessions_spawn"
+                | "subagents_list"
+                | "subagents_info"
+                | "subagents_kill"
+                | "subagents_focus"
+                | "subagents_unfocus"
+                | "subagents_focused"
+                | "subagents_send"
+                | "subagents_orchestrate"
         )
     }
 
@@ -195,7 +208,33 @@ impl ToolRegistry {
                 db.clone(),
                 &config.data_dir,
             )),
-            Box::new(sub_agent::SubAgentTool::new(config, db.clone())),
+            Box::new(subagents::SessionsSpawnTool::new(
+                config,
+                db.clone(),
+                channel_registry.clone(),
+            )),
+            Box::new(subagents::SubagentsListTool::new(db.clone())),
+            Box::new(subagents::SubagentsInfoTool::new(db.clone())),
+            Box::new(subagents::SubagentsKillTool::new(config, db.clone())),
+            Box::new(subagents::SubagentsFocusTool::new(db.clone())),
+            Box::new(subagents::SubagentsUnfocusTool::new(db.clone())),
+            Box::new(subagents::SubagentsFocusedTool::new(db.clone())),
+            Box::new(subagents::SubagentsSendTool::new(
+                config,
+                db.clone(),
+                channel_registry.clone(),
+            )),
+            Box::new(subagents::SubagentsOrchestrateTool::new(
+                config,
+                db.clone(),
+                channel_registry.clone(),
+            )),
+            Box::new(subagents::SubagentsLogTool::new(db.clone())),
+            Box::new(subagents::SubagentsRetryAnnouncesTool::new(
+                config,
+                db.clone(),
+                channel_registry.clone(),
+            )),
             Box::new(activate_skill::ActivateSkillTool::new_with_runtime(
                 &skills_data_dir,
                 &config.data_dir,
@@ -236,8 +275,14 @@ impl ToolRegistry {
         }
     }
 
-    /// Create a restricted tool registry for sub-agents (no side-effect or recursive tools).
-    pub fn new_sub_agent(config: &Config, db: Arc<Database>) -> Self {
+    /// Create a restricted tool registry for sub-agents.
+    /// When `allow_session_tools` is true, orchestration tools are exposed for depth-limited child spawning.
+    pub fn new_sub_agent(
+        config: &Config,
+        db: Arc<Database>,
+        channel_registry: Option<Arc<ChannelRegistry>>,
+        allow_session_tools: bool,
+    ) -> Self {
         let working_dir = PathBuf::from(&config.working_dir);
         if let Err(e) = std::fs::create_dir_all(&working_dir) {
             tracing::warn!(
@@ -253,7 +298,7 @@ impl ToolRegistry {
             Self::build_extra_mounts(&working_dir, &skills_data_dir),
         ));
         let memory_backend = Arc::new(MemoryBackend::local_only(db.clone()));
-        let tools: Vec<Box<dyn Tool>> = vec![
+        let mut tools: Vec<Box<dyn Tool>> = vec![
             Box::new(
                 bash::BashTool::new_with_isolation(
                     &config.working_dir,
@@ -303,10 +348,31 @@ impl ToolRegistry {
                 &config.data_dir,
             )),
             Box::new(structured_memory::StructuredMemorySearchTool::new(
-                db,
+                db.clone(),
                 memory_backend,
             )),
         ];
+        if allow_session_tools {
+            if let Some(channel_registry) = channel_registry {
+                tools.push(Box::new(subagents::SessionsSpawnTool::new(
+                    config,
+                    db.clone(),
+                    channel_registry.clone(),
+                )));
+                tools.push(Box::new(subagents::SubagentsListTool::new(db.clone())));
+                tools.push(Box::new(subagents::SubagentsInfoTool::new(db.clone())));
+                tools.push(Box::new(subagents::SubagentsKillTool::new(
+                    config,
+                    db.clone(),
+                )));
+                tools.push(Box::new(subagents::SubagentsOrchestrateTool::new(
+                    config,
+                    db.clone(),
+                    channel_registry.clone(),
+                )));
+                tools.push(Box::new(subagents::SubagentsLogTool::new(db.clone())));
+            }
+        }
         ToolRegistry {
             config: config.clone(),
             tools,

@@ -8,6 +8,7 @@ This directory tracks RFCs for the MicroClaw feature-completion program.
 - Hooks platform MVP
 - Session forking data/API model
 - Metrics and tracing naming standard
+- Session-native subagents runtime model
 
 ## RFCs
 
@@ -15,6 +16,7 @@ This directory tracks RFCs for the MicroClaw feature-completion program.
 - `0002-hooks-event-model.md`
 - `0003-session-fork-model.md`
 - `0004-metrics-naming.md`
+- `0005-subagents-runtime-v1.md`
 
 ## Status Lifecycle
 

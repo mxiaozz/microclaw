@@ -19,6 +19,7 @@ use crate::chat_commands::maybe_handle_plugin_command;
 use crate::chat_commands::{handle_chat_command, is_slash_command, unknown_command_response};
 use crate::runtime::AppState;
 use crate::setup_def::{ChannelFieldDef, DynamicChannelDef};
+use crate::tools::ToolAuthContext;
 use microclaw_channels::channel::ConversationKind;
 use microclaw_channels::channel_adapter::ChannelAdapter;
 use microclaw_core::text::split_text;
@@ -1119,6 +1120,69 @@ async fn handle_slack_message(
         channel,
         text.chars().take(100).collect::<String>()
     );
+
+    if app_state.config.subagents.thread_bound_routing_enabled {
+        let focused = match call_blocking(app_state.db.clone(), move |db| {
+            db.get_subagent_focus(chat_id)
+        })
+        .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                warn!(
+                    "Slack focused-run lookup failed for chat {}: {}",
+                    chat_id, e
+                );
+                None
+            }
+        };
+        if focused.is_some() {
+            let auth = ToolAuthContext {
+                caller_channel: runtime.channel_name.clone(),
+                caller_chat_id: chat_id,
+                control_chat_ids: app_state.config.control_chat_ids.clone(),
+                env_files: Vec::new(),
+            };
+            let routed = app_state
+                .tools
+                .execute_with_auth(
+                    "subagents_send",
+                    serde_json::json!({
+                        "message": text,
+                        "chat_id": chat_id
+                    }),
+                    &auth,
+                )
+                .await;
+            if !routed.is_error {
+                let route_ack = serde_json::from_str::<serde_json::Value>(&routed.content)
+                    .ok()
+                    .and_then(|v| {
+                        v.get("run_id")
+                            .and_then(|id| id.as_str())
+                            .map(|id| format!("Routed to focused subagent run `{id}`."))
+                    })
+                    .unwrap_or_else(|| "Routed to focused subagent continuation run.".to_string());
+                let _ =
+                    send_slack_response(bot_token, channel, normalized_thread_ts, &route_ack).await;
+                let bot_msg = StoredMessage {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    chat_id,
+                    sender_name: runtime.bot_username.clone(),
+                    content: route_ack,
+                    is_from_bot: true,
+                    timestamp: chrono::Utc::now().to_rfc3339(),
+                };
+                let _ =
+                    call_blocking(app_state.db.clone(), move |db| db.store_message(&bot_msg)).await;
+                return;
+            }
+            warn!(
+                "Slack focused subagent routing failed for chat {}: {}",
+                chat_id, routed.content
+            );
+        }
+    }
 
     let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
 

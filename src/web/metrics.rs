@@ -1,4 +1,12 @@
 use super::*;
+use serde::Deserialize;
+
+#[derive(Debug, Deserialize)]
+pub struct SubagentObservabilityQuery {
+    pub session_key: Option<String>,
+    pub scope: Option<String>,
+    pub limit: Option<usize>,
+}
 
 pub(super) async fn api_metrics(
     headers: HeaderMap,
@@ -165,6 +173,63 @@ pub(super) async fn api_metrics_history(
             "mcp_bulkhead_rejections": r.mcp_bulkhead_rejections,
             "mcp_circuit_open_rejections": r.mcp_circuit_open_rejections,
             "active_sessions": r.active_sessions
+        })).collect::<Vec<_>>()
+    })))
+}
+
+pub(super) async fn api_subagents_observability(
+    headers: HeaderMap,
+    State(state): State<WebState>,
+    Query(query): Query<SubagentObservabilityQuery>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    metrics_http_inc(&state).await;
+    require_scope(&state, &headers, AuthScope::Read).await?;
+
+    let scope = query
+        .scope
+        .as_deref()
+        .unwrap_or("chat")
+        .trim()
+        .to_ascii_lowercase();
+    let chat_id_filter = if scope == "global" {
+        None
+    } else {
+        let session_key = normalize_session_key(query.session_key.as_deref());
+        Some(resolve_chat_id_for_session_key_read(&state, &session_key).await?)
+    };
+    let limit = query.limit.unwrap_or(30).clamp(1, 200);
+    let snapshot = call_blocking(state.app_state.db.clone(), move |db| {
+        db.get_subagent_observability_snapshot(chat_id_filter, limit)
+    })
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(json!({
+        "ok": true,
+        "scope": if scope == "global" { "global" } else { "chat" },
+        "summary": {
+            "active_runs": snapshot.active_runs,
+            "queued_runs": snapshot.queued_runs,
+            "running_runs": snapshot.running_runs,
+            "pending_announces": snapshot.pending_announces,
+            "retry_announces": snapshot.retry_announces,
+            "failed_announces": snapshot.failed_announces,
+            "completed_24h": snapshot.completed_24h,
+            "failed_24h": snapshot.failed_24h,
+            "budget_exceeded_24h": snapshot.budget_exceeded_24h,
+            "avg_duration_ms_24h": snapshot.avg_duration_ms_24h,
+        },
+        "recent_runs": snapshot.recent_runs.into_iter().map(|r| json!({
+            "run_id": r.run_id,
+            "parent_run_id": r.parent_run_id,
+            "depth": r.depth,
+            "status": r.status,
+            "created_at": r.created_at,
+            "started_at": r.started_at,
+            "finished_at": r.finished_at,
+            "token_budget": r.token_budget,
+            "total_tokens": r.total_tokens,
+            "chat_id": r.chat_id,
         })).collect::<Vec<_>>()
     })))
 }

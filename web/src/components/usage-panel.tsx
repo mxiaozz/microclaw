@@ -29,6 +29,30 @@ export type InjectionLogPoint = {
   candidate_count: number
 }
 
+export type SubagentObservability = {
+  summary: {
+    active_runs: number
+    queued_runs: number
+    running_runs: number
+    pending_announces: number
+    retry_announces: number
+    failed_announces: number
+    completed_24h: number
+    failed_24h: number
+    budget_exceeded_24h: number
+    avg_duration_ms_24h: number
+  }
+  recent_runs: Array<{
+    run_id: string
+    parent_run_id?: string | null
+    depth: number
+    status: string
+    created_at: string
+    token_budget: number
+    total_tokens: number
+  }>
+}
+
 type UsagePanelProps = {
   open: boolean
   onOpenChange: (open: boolean) => void
@@ -38,6 +62,7 @@ type UsagePanelProps = {
   usageError: string
   usageReport: string
   usageMemory: MemoryObservability | null
+  usageSubagents: SubagentObservability | null
   reflectorRuns: ReflectorRunPoint[]
   injectionLogs: InjectionLogPoint[]
   onRefreshCurrent: () => void
@@ -132,6 +157,7 @@ export function UsagePanel(props: UsagePanelProps) {
     usageError,
     usageReport,
     usageMemory,
+    usageSubagents,
     reflectorRuns,
     injectionLogs,
     onRefreshCurrent,
@@ -273,6 +299,78 @@ export function UsagePanel(props: UsagePanelProps) {
                       <TrendRow title="Reflector Skips (7d)" subtitle="daily buckets" values={trend7d.skipped} color="#d97706" />
                       <TrendRow title="Injection Coverage (7d)" subtitle="selected/candidates %" values={trend7d.coverage} color="#7e22ce" />
                     </div>
+                  </div>
+                ) : null}
+
+                {usageSubagents ? (
+                  <div className="space-y-3">
+                    <Flex justify="between" align="center">
+                      <Text size="2" weight="bold">Subagents Observability</Text>
+                      <Text size="1" color="gray">queue + run DAG snapshot</Text>
+                    </Flex>
+                    <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4">
+                      <Card className="p-3">
+                        <Text size="1" color="gray" className="block">Active</Text>
+                        <Text size="4" weight="bold" className="mt-1 block">{fmtInt(usageSubagents.summary.active_runs)}</Text>
+                        <Text size="1" color="gray" className="mt-1 block">
+                          queued {fmtInt(usageSubagents.summary.queued_runs)} / running {fmtInt(usageSubagents.summary.running_runs)}
+                        </Text>
+                      </Card>
+                      <Card className="p-3">
+                        <Text size="1" color="gray" className="block">Announce Queue</Text>
+                        <Text size="4" weight="bold" className="mt-1 block">{fmtInt(usageSubagents.summary.pending_announces + usageSubagents.summary.retry_announces)}</Text>
+                        <Text size="1" color="gray" className="mt-1 block">
+                          retry {fmtInt(usageSubagents.summary.retry_announces)} / failed {fmtInt(usageSubagents.summary.failed_announces)}
+                        </Text>
+                      </Card>
+                      <Card className="p-3">
+                        <Text size="1" color="gray" className="block">24h Outcome</Text>
+                        <Text size="4" weight="bold" className="mt-1 block">
+                          {fmtInt(usageSubagents.summary.completed_24h)}
+                        </Text>
+                        <Text size="1" color="gray" className="mt-1 block">
+                          fail {fmtInt(usageSubagents.summary.failed_24h)} / budget {fmtInt(usageSubagents.summary.budget_exceeded_24h)}
+                        </Text>
+                      </Card>
+                      <Card className="p-3">
+                        <Text size="1" color="gray" className="block">Avg Duration 24h</Text>
+                        <Text size="4" weight="bold" className="mt-1 block">
+                          {fmtInt(usageSubagents.summary.avg_duration_ms_24h)} ms
+                        </Text>
+                        <Text size="1" color="gray" className="mt-1 block">
+                          recent runs: {fmtInt(usageSubagents.recent_runs.length)}
+                        </Text>
+                      </Card>
+                    </div>
+                    <Card className="p-3">
+                      <Text size="1" color="gray" className="block">Recent Run DAG</Text>
+                      <div className="mt-2 overflow-auto">
+                        <table className="min-w-full text-left text-xs">
+                          <thead>
+                            <tr className="border-b border-[var(--gray-5)]">
+                              <th className="py-1 pr-2">run</th>
+                              <th className="py-1 pr-2">parent</th>
+                              <th className="py-1 pr-2">depth</th>
+                              <th className="py-1 pr-2">status</th>
+                              <th className="py-1 pr-2">budget</th>
+                              <th className="py-1 pr-2">tokens</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {usageSubagents.recent_runs.map((r) => (
+                              <tr key={r.run_id} className="border-b border-[var(--gray-4)]">
+                                <td className="py-1 pr-2"><code>{r.run_id.slice(0, 14)}</code></td>
+                                <td className="py-1 pr-2"><code>{(r.parent_run_id || '-').toString().slice(0, 14)}</code></td>
+                                <td className="py-1 pr-2">{fmtInt(r.depth)}</td>
+                                <td className="py-1 pr-2">{r.status}</td>
+                                <td className="py-1 pr-2">{fmtInt(r.token_budget)}</td>
+                                <td className="py-1 pr-2">{fmtInt(r.total_tokens)}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </Card>
                   </div>
                 ) : null}
                 <Card className="p-3">

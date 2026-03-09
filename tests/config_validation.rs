@@ -40,6 +40,7 @@ fn minimal_config() -> Config {
         discord_no_mention: false,
         allow_group_slash_without_mention: false,
         show_thinking: false,
+        subagents: microclaw::config::SubagentConfig::default(),
         openai_compat_body_overrides: std::collections::HashMap::new(),
         openai_compat_body_overrides_by_provider: std::collections::HashMap::new(),
         openai_compat_body_overrides_by_model: std::collections::HashMap::new(),

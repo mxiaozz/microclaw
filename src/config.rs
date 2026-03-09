@@ -141,6 +141,36 @@ fn default_web_session_idle_ttl_seconds() -> u64 {
 fn default_allow_group_slash_without_mention() -> bool {
     false
 }
+fn default_subagent_max_concurrent() -> usize {
+    4
+}
+fn default_subagent_max_active_per_chat() -> usize {
+    5
+}
+fn default_subagent_run_timeout_secs() -> u64 {
+    900
+}
+fn default_subagent_announce() -> bool {
+    true
+}
+fn default_subagent_max_spawn_depth() -> usize {
+    1
+}
+fn default_subagent_max_children_per_run() -> usize {
+    5
+}
+fn default_subagent_thread_bound_routing_enabled() -> bool {
+    true
+}
+fn default_subagent_announce_relay_interval_secs() -> u64 {
+    15
+}
+fn default_subagent_max_tokens_per_run() -> i64 {
+    120_000
+}
+fn default_subagent_orchestrate_max_workers() -> usize {
+    5
+}
 
 fn default_model_prices() -> Vec<ModelPrice> {
     Vec::new()
@@ -225,6 +255,47 @@ pub struct ResolvedLlmProviderProfile {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SubagentConfig {
+    #[serde(default = "default_subagent_max_concurrent")]
+    pub max_concurrent: usize,
+    #[serde(default = "default_subagent_max_active_per_chat")]
+    pub max_active_per_chat: usize,
+    #[serde(default = "default_subagent_run_timeout_secs")]
+    pub run_timeout_secs: u64,
+    #[serde(default = "default_subagent_announce")]
+    pub announce_to_chat: bool,
+    #[serde(default = "default_subagent_max_spawn_depth")]
+    pub max_spawn_depth: usize,
+    #[serde(default = "default_subagent_max_children_per_run")]
+    pub max_children_per_run: usize,
+    #[serde(default = "default_subagent_thread_bound_routing_enabled")]
+    pub thread_bound_routing_enabled: bool,
+    #[serde(default = "default_subagent_announce_relay_interval_secs")]
+    pub announce_relay_interval_secs: u64,
+    #[serde(default = "default_subagent_max_tokens_per_run")]
+    pub max_tokens_per_run: i64,
+    #[serde(default = "default_subagent_orchestrate_max_workers")]
+    pub orchestrate_max_workers: usize,
+}
+
+impl Default for SubagentConfig {
+    fn default() -> Self {
+        Self {
+            max_concurrent: default_subagent_max_concurrent(),
+            max_active_per_chat: default_subagent_max_active_per_chat(),
+            run_timeout_secs: default_subagent_run_timeout_secs(),
+            announce_to_chat: default_subagent_announce(),
+            max_spawn_depth: default_subagent_max_spawn_depth(),
+            max_children_per_run: default_subagent_max_children_per_run(),
+            thread_bound_routing_enabled: default_subagent_thread_bound_routing_enabled(),
+            announce_relay_interval_secs: default_subagent_announce_relay_interval_secs(),
+            max_tokens_per_run: default_subagent_max_tokens_per_run(),
+            orchestrate_max_workers: default_subagent_orchestrate_max_workers(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Config {
     // --- LLM / API ---
     #[serde(default = "default_llm_provider")]
@@ -263,6 +334,8 @@ pub struct Config {
     pub default_mcp_request_timeout_secs: u64,
     #[serde(default)]
     pub show_thinking: bool,
+    #[serde(default)]
+    pub subagents: SubagentConfig,
     /// OpenAI-compatible request-body overrides applied for all models/providers.
     /// Set a key to `null` to remove that field from the outgoing JSON body.
     #[serde(default)]
@@ -604,6 +677,7 @@ impl Config {
             discord_no_mention: false,
             allow_group_slash_without_mention: false,
             show_thinking: false,
+            subagents: SubagentConfig::default(),
             openai_compat_body_overrides: HashMap::new(),
             openai_compat_body_overrides_by_provider: HashMap::new(),
             openai_compat_body_overrides_by_model: HashMap::new(),
@@ -999,6 +1073,38 @@ Use operator password + API keys for Web auth."
         if self.default_mcp_request_timeout_secs == 0 {
             self.default_mcp_request_timeout_secs = default_mcp_request_timeout_secs();
         }
+        if self.subagents.max_concurrent == 0 {
+            self.subagents.max_concurrent = default_subagent_max_concurrent();
+        }
+        if self.subagents.max_active_per_chat == 0 {
+            self.subagents.max_active_per_chat = default_subagent_max_active_per_chat();
+        }
+        if self.subagents.run_timeout_secs == 0 {
+            self.subagents.run_timeout_secs = default_subagent_run_timeout_secs();
+        }
+        if self.subagents.max_spawn_depth == 0 {
+            self.subagents.max_spawn_depth = default_subagent_max_spawn_depth();
+        }
+        self.subagents.max_spawn_depth = self.subagents.max_spawn_depth.min(5);
+        if self.subagents.max_children_per_run == 0 {
+            self.subagents.max_children_per_run = default_subagent_max_children_per_run();
+        }
+        if self.subagents.announce_relay_interval_secs == 0 {
+            self.subagents.announce_relay_interval_secs =
+                default_subagent_announce_relay_interval_secs();
+        }
+        self.subagents.announce_relay_interval_secs =
+            self.subagents.announce_relay_interval_secs.clamp(1, 300);
+        if self.subagents.max_tokens_per_run <= 0 {
+            self.subagents.max_tokens_per_run = default_subagent_max_tokens_per_run();
+        }
+        self.subagents.max_tokens_per_run =
+            self.subagents.max_tokens_per_run.clamp(2_000, 2_000_000);
+        if self.subagents.orchestrate_max_workers == 0 {
+            self.subagents.orchestrate_max_workers = default_subagent_orchestrate_max_workers();
+        }
+        self.subagents.orchestrate_max_workers =
+            self.subagents.orchestrate_max_workers.clamp(1, 12);
         self.tool_timeout_overrides = self
             .tool_timeout_overrides
             .drain()

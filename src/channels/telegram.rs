@@ -18,6 +18,7 @@ use crate::channels::startup_guard::{
 use crate::chat_commands::maybe_handle_plugin_command;
 use crate::chat_commands::{handle_chat_command, is_slash_command, unknown_command_response};
 use crate::runtime::AppState;
+use crate::tools::ToolAuthContext;
 use microclaw_channels::channel::ConversationKind;
 use microclaw_channels::channel_adapter::ChannelAdapter;
 #[cfg(test)]
@@ -974,7 +975,7 @@ async fn handle_message(
         id: inbound_message_id.clone(),
         chat_id,
         sender_name: sender_name.clone(),
-        content: stored_content,
+        content: stored_content.clone(),
         is_from_bot: false,
         timestamp: chrono::Utc::now().to_rfc3339(),
     };
@@ -1002,6 +1003,64 @@ async fn handle_message(
             tg_bot_user_id
         );
         return Ok(());
+    }
+
+    if state.config.subagents.thread_bound_routing_enabled {
+        let focused =
+            match call_blocking(state.db.clone(), move |db| db.get_subagent_focus(chat_id)).await {
+                Ok(v) => v,
+                Err(e) => {
+                    warn!(
+                        "Telegram focused-run lookup failed for chat {}: {}",
+                        chat_id, e
+                    );
+                    None
+                }
+            };
+        if focused.is_some() {
+            let auth = ToolAuthContext {
+                caller_channel: tg_channel_name.clone(),
+                caller_chat_id: chat_id,
+                control_chat_ids: state.config.control_chat_ids.clone(),
+                env_files: Vec::new(),
+            };
+            let routed = state
+                .tools
+                .execute_with_auth(
+                    "subagents_send",
+                    serde_json::json!({
+                        "message": stored_content,
+                        "chat_id": chat_id
+                    }),
+                    &auth,
+                )
+                .await;
+            if !routed.is_error {
+                let route_ack = serde_json::from_str::<serde_json::Value>(&routed.content)
+                    .ok()
+                    .and_then(|v| {
+                        v.get("run_id")
+                            .and_then(|id| id.as_str())
+                            .map(|id| format!("Routed to focused subagent run `{id}`."))
+                    })
+                    .unwrap_or_else(|| "Routed to focused subagent continuation run.".to_string());
+                send_response(&bot, msg.chat.id, &route_ack, msg.thread_id).await;
+                let bot_msg = StoredMessage {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    chat_id,
+                    sender_name: tg_bot_username.clone(),
+                    content: route_ack,
+                    is_from_bot: true,
+                    timestamp: chrono::Utc::now().to_rfc3339(),
+                };
+                let _ = call_blocking(state.db.clone(), move |db| db.store_message(&bot_msg)).await;
+                return Ok(());
+            }
+            warn!(
+                "Telegram focused subagent routing failed for chat {}: {}",
+                chat_id, routed.content
+            );
+        }
     }
 
     info!(
@@ -2051,9 +2110,10 @@ mod tests {
     }
 
     #[test]
-    fn test_build_system_prompt_mentions_sub_agent() {
+    fn test_build_system_prompt_mentions_subagent_tools() {
         let prompt = build_system_prompt("testbot", "telegram", "", 12345, "", "UTC", None);
-        assert!(prompt.contains("sub_agent"));
+        assert!(prompt.contains("sessions_spawn"));
+        assert!(prompt.contains("subagents_list"));
     }
 
     #[test]
