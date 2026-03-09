@@ -183,7 +183,7 @@ pub struct AuditLogRecord {
 pub type SessionMetaRow = (String, String, Option<String>, Option<i64>);
 pub type SessionTreeRow = (i64, Option<String>, Option<i64>, String);
 
-const SCHEMA_VERSION_CURRENT: i64 = 16;
+const SCHEMA_VERSION_CURRENT: i64 = 17;
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
@@ -760,6 +760,17 @@ fn apply_schema_migrations(conn: &Connection) -> Result<(), MicroClawError> {
         )?;
         set_schema_version(conn, 16)?;
         version = 16;
+    }
+    if version < 17 {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS subagent_focus_bindings (
+                chat_id INTEGER PRIMARY KEY,
+                run_id TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );",
+        )?;
+        set_schema_version(conn, 17)?;
+        version = 17;
     }
     if version != SCHEMA_VERSION_CURRENT {
         set_schema_version(conn, SCHEMA_VERSION_CURRENT)?;
@@ -3969,6 +3980,40 @@ impl Database {
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn set_subagent_focus(&self, chat_id: i64, run_id: &str) -> Result<(), MicroClawError> {
+        let conn = self.lock_conn();
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO subagent_focus_bindings(chat_id, run_id, updated_at)
+             VALUES(?1, ?2, ?3)
+             ON CONFLICT(chat_id) DO UPDATE SET
+                run_id = excluded.run_id,
+                updated_at = excluded.updated_at",
+            params![chat_id, run_id, now],
+        )?;
+        Ok(())
+    }
+
+    pub fn clear_subagent_focus(&self, chat_id: i64) -> Result<(), MicroClawError> {
+        let conn = self.lock_conn();
+        conn.execute(
+            "DELETE FROM subagent_focus_bindings WHERE chat_id = ?1",
+            params![chat_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_subagent_focus(&self, chat_id: i64) -> Result<Option<String>, MicroClawError> {
+        let conn = self.lock_conn();
+        conn.query_row(
+            "SELECT run_id FROM subagent_focus_bindings WHERE chat_id = ?1",
+            params![chat_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(Into::into)
     }
 }
 

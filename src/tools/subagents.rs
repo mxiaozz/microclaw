@@ -1017,6 +1017,273 @@ pub struct SubagentsRetryAnnouncesTool {
     channel_registry: Arc<ChannelRegistry>,
 }
 
+pub struct SubagentsFocusTool {
+    db: Arc<Database>,
+}
+
+impl SubagentsFocusTool {
+    pub fn new(db: Arc<Database>) -> Self {
+        Self { db }
+    }
+}
+
+#[async_trait]
+impl Tool for SubagentsFocusTool {
+    fn name(&self) -> &str {
+        "subagents_focus"
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "subagents_focus".into(),
+            description: "Bind the current chat to a subagent run for follow-up actions.".into(),
+            input_schema: schema_object(
+                json!({
+                    "run_id": {"type":"string"},
+                    "chat_id": {"type":"integer"}
+                }),
+                &["run_id"],
+            ),
+        }
+    }
+
+    async fn execute(&self, input: serde_json::Value) -> ToolResult {
+        let auth = match auth_context_from_input(&input) {
+            Some(v) => v,
+            None => {
+                return ToolResult::error("subagents_focus requires caller auth context".into())
+            }
+        };
+        let chat_id = input
+            .get("chat_id")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(auth.caller_chat_id);
+        if let Err(e) = authorize_chat_access(&input, chat_id) {
+            return ToolResult::error(e);
+        }
+        let run_id = match input.get("run_id").and_then(|v| v.as_str()) {
+            Some(v) if !v.trim().is_empty() => v.trim().to_string(),
+            _ => return ToolResult::error("Missing required parameter: run_id".into()),
+        };
+        let run_id_for_check = run_id.clone();
+        let exists = match call_blocking(self.db.clone(), move |db| {
+            db.get_subagent_run(&run_id_for_check, chat_id)
+        })
+        .await
+        {
+            Ok(v) => v.is_some(),
+            Err(e) => return ToolResult::error(format!("Failed reading subagent run: {e}")),
+        };
+        if !exists {
+            return ToolResult::error("Subagent run not found".into());
+        }
+        let run_id_for_set = run_id.clone();
+        if let Err(e) = call_blocking(self.db.clone(), move |db| {
+            db.set_subagent_focus(chat_id, &run_id_for_set)
+        })
+        .await
+        {
+            return ToolResult::error(format!("Failed setting subagent focus: {e}"));
+        }
+        ToolResult::success(json!({"status":"ok","chat_id":chat_id,"run_id":run_id}).to_string())
+    }
+}
+
+pub struct SubagentsUnfocusTool {
+    db: Arc<Database>,
+}
+
+impl SubagentsUnfocusTool {
+    pub fn new(db: Arc<Database>) -> Self {
+        Self { db }
+    }
+}
+
+#[async_trait]
+impl Tool for SubagentsUnfocusTool {
+    fn name(&self) -> &str {
+        "subagents_unfocus"
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "subagents_unfocus".into(),
+            description: "Clear focused subagent binding for the current chat.".into(),
+            input_schema: schema_object(
+                json!({
+                    "chat_id": {"type":"integer"}
+                }),
+                &[],
+            ),
+        }
+    }
+
+    async fn execute(&self, input: serde_json::Value) -> ToolResult {
+        let auth = match auth_context_from_input(&input) {
+            Some(v) => v,
+            None => {
+                return ToolResult::error("subagents_unfocus requires caller auth context".into())
+            }
+        };
+        let chat_id = input
+            .get("chat_id")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(auth.caller_chat_id);
+        if let Err(e) = authorize_chat_access(&input, chat_id) {
+            return ToolResult::error(e);
+        }
+        if let Err(e) =
+            call_blocking(self.db.clone(), move |db| db.clear_subagent_focus(chat_id)).await
+        {
+            return ToolResult::error(format!("Failed clearing subagent focus: {e}"));
+        }
+        ToolResult::success(json!({"status":"ok","chat_id":chat_id}).to_string())
+    }
+}
+
+pub struct SubagentsFocusedTool {
+    db: Arc<Database>,
+}
+
+impl SubagentsFocusedTool {
+    pub fn new(db: Arc<Database>) -> Self {
+        Self { db }
+    }
+}
+
+#[async_trait]
+impl Tool for SubagentsFocusedTool {
+    fn name(&self) -> &str {
+        "subagents_focused"
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "subagents_focused".into(),
+            description: "Show focused subagent binding for current chat.".into(),
+            input_schema: schema_object(
+                json!({
+                    "chat_id": {"type":"integer"}
+                }),
+                &[],
+            ),
+        }
+    }
+
+    async fn execute(&self, input: serde_json::Value) -> ToolResult {
+        let auth = match auth_context_from_input(&input) {
+            Some(v) => v,
+            None => {
+                return ToolResult::error("subagents_focused requires caller auth context".into())
+            }
+        };
+        let chat_id = input
+            .get("chat_id")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(auth.caller_chat_id);
+        if let Err(e) = authorize_chat_access(&input, chat_id) {
+            return ToolResult::error(e);
+        }
+        let focused =
+            match call_blocking(self.db.clone(), move |db| db.get_subagent_focus(chat_id)).await {
+                Ok(v) => v,
+                Err(e) => return ToolResult::error(format!("Failed loading subagent focus: {e}")),
+            };
+        ToolResult::success(json!({"chat_id":chat_id,"run_id":focused}).to_string())
+    }
+}
+
+pub struct SubagentsSendTool {
+    config: Config,
+    db: Arc<Database>,
+    channel_registry: Arc<ChannelRegistry>,
+}
+
+impl SubagentsSendTool {
+    pub fn new(config: &Config, db: Arc<Database>, channel_registry: Arc<ChannelRegistry>) -> Self {
+        Self {
+            config: config.clone(),
+            db,
+            channel_registry,
+        }
+    }
+}
+
+#[async_trait]
+impl Tool for SubagentsSendTool {
+    fn name(&self) -> &str {
+        "subagents_send"
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "subagents_send".into(),
+            description:
+                "Send follow-up work to focused subagent by spawning a child continuation run."
+                    .into(),
+            input_schema: schema_object(
+                json!({
+                    "message": {"type":"string"},
+                    "chat_id": {"type":"integer"}
+                }),
+                &["message"],
+            ),
+        }
+    }
+
+    async fn execute(&self, input: serde_json::Value) -> ToolResult {
+        let auth = match auth_context_from_input(&input) {
+            Some(v) => v,
+            None => return ToolResult::error("subagents_send requires caller auth context".into()),
+        };
+        let chat_id = input
+            .get("chat_id")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(auth.caller_chat_id);
+        if let Err(e) = authorize_chat_access(&input, chat_id) {
+            return ToolResult::error(e);
+        }
+        let message = match input.get("message").and_then(|v| v.as_str()) {
+            Some(v) if !v.trim().is_empty() => v.trim().to_string(),
+            _ => return ToolResult::error("Missing required parameter: message".into()),
+        };
+        let focused_run =
+            match call_blocking(self.db.clone(), move |db| db.get_subagent_focus(chat_id)).await {
+                Ok(Some(v)) => v,
+                Ok(None) => return ToolResult::error("No focused subagent for this chat".into()),
+                Err(e) => return ToolResult::error(format!("Failed loading subagent focus: {e}")),
+            };
+        let focused_run_for_load = focused_run.clone();
+        let parent = match call_blocking(self.db.clone(), move |db| {
+            db.get_subagent_run(&focused_run_for_load, chat_id)
+        })
+        .await
+        {
+            Ok(Some(v)) => v,
+            Ok(None) => return ToolResult::error("Focused subagent run not found".into()),
+            Err(e) => return ToolResult::error(format!("Failed loading focused subagent: {e}")),
+        };
+
+        let spawn_tool =
+            SessionsSpawnTool::new(&self.config, self.db.clone(), self.channel_registry.clone());
+        let spawn_input = json!({
+            "task": format!("Continuation request: {message}"),
+            "context": format!("This is a follow-up sent to focused run {}. Continue the work based on prior run context and produce actionable output.", focused_run),
+            "__microclaw_auth": {
+                "caller_channel": auth.caller_channel,
+                "caller_chat_id": chat_id,
+                "control_chat_ids": auth.control_chat_ids,
+                "env_files": auth.env_files,
+            },
+            "__subagent_runtime": {
+                "run_id": parent.run_id,
+                "depth": parent.depth,
+            }
+        });
+        spawn_tool.execute(spawn_input).await
+    }
+}
+
 pub struct SubagentsLogTool {
     db: Arc<Database>,
 }

@@ -211,6 +211,14 @@ impl ToolRegistry {
             Box::new(subagents::SubagentsListTool::new(db.clone())),
             Box::new(subagents::SubagentsInfoTool::new(db.clone())),
             Box::new(subagents::SubagentsKillTool::new(config, db.clone())),
+            Box::new(subagents::SubagentsFocusTool::new(db.clone())),
+            Box::new(subagents::SubagentsUnfocusTool::new(db.clone())),
+            Box::new(subagents::SubagentsFocusedTool::new(db.clone())),
+            Box::new(subagents::SubagentsSendTool::new(
+                config,
+                db.clone(),
+                channel_registry.clone(),
+            )),
             Box::new(subagents::SubagentsLogTool::new(db.clone())),
             Box::new(subagents::SubagentsRetryAnnouncesTool::new(
                 config,
