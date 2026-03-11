@@ -244,17 +244,27 @@ Since MicroClaw is a multi-platform bot with external dependencies (LLM APIs, Te
 
 ---
 
-## 16. Sub-Agent
+## 16. Session-Native Subagents
 
 | # | User Story | Steps | Expected |
 |---|-----------|-------|----------|
-| 16.1 | Basic sub-agent task | "Use sub_agent to count .rs files in this project" | Sub-agent uses glob/bash, result returned to main conversation |
-| 16.2 | Sub-agent cannot schedule | "Use sub_agent to create a scheduled task" | Sub-agent reports no scheduling tools available |
-| 16.3 | Sub-agent cannot send_message | "Use sub_agent to send me a message" | Sub-agent reports no send_message tool |
-| 16.4 | Sub-agent cannot write memory | "Use sub_agent to save a memory" | Sub-agent has no write_memory tool |
-| 16.5 | Sub-agent cannot recurse | "Use sub_agent to start another sub_agent" | Sub-agent has no sub_agent tool |
-| 16.6 | Sub-agent iteration limit | Give sub-agent a task requiring >10 iterations | Returns "reached maximum iterations" |
-| 16.7 | Sub-agent with context | Pass context parameter to sub-agent | Sub-agent uses the extra context to complete task |
+| 16.1 | Spawn subagent run | Ask the bot to delegate repo inspection work | Bot creates a `sessions_spawn` run and returns a durable run ID |
+| 16.2 | Inspect active runs | Ask to list or inspect the latest run | `subagents_list` / `subagents_info` show status, budget, and result fields |
+| 16.3 | Continue focused run | Focus a run, then send follow-up work | `subagents_send` continues the same run instead of creating a fresh one |
+| 16.4 | Cancel stale run | Cancel an active run | `subagents_kill` marks the run cancelled and the run stops progressing |
+| 16.5 | Orchestrated fan-out | Ask for a bounded multi-worker delegation task | `subagents_orchestrate` creates multiple child runs within configured limits |
+| 16.6 | Budget handling | Run a large task with too-small token budget | Run ends with `budget_exceeded` and reports input/output totals |
+| 16.7 | Configured budget increase | Raise `subagents.max_tokens_per_run`, rerun the task | The same task completes successfully or gets materially farther |
+
+---
+
+## 16A. ACP Stdio Mode
+
+| # | User Story | Steps | Expected |
+|---|-----------|-------|----------|
+| 16A.1 | ACP startup | Run `microclaw acp` | MicroClaw starts as an ACP stdio server |
+| 16A.2 | ACP session continuity | Use one ACP client session for two turns | Second turn keeps prior context |
+| 16A.3 | ACP cancellation | Start a long-running ACP request, then send `/stop` | Active ACP run is cancelled cleanly |
 
 ---
 

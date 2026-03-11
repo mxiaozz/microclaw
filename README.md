@@ -194,7 +194,16 @@ For a deeper dive into the architecture and design decisions, read: **[Building 
 | `cancel_scheduled_task` | Cancel a task permanently |
 | `get_task_history` | View execution history for a scheduled task |
 | `export_chat` | Export chat history to markdown |
-| `sub_agent` | Delegate a sub-task to a parallel agent with restricted tools |
+| `sessions_spawn` | Spawn an asynchronous sub-agent run and return immediately |
+| `subagents_list` | List sub-agent runs for the current chat |
+| `subagents_info` | Inspect one sub-agent run in detail |
+| `subagents_kill` | Cancel one run or all active runs in the current chat |
+| `subagents_focus` | Focus the chat on a specific sub-agent run |
+| `subagents_unfocus` | Clear focused sub-agent binding |
+| `subagents_focused` | Show current focused sub-agent run |
+| `subagents_send` | Send follow-up work to the focused sub-agent run |
+| `subagents_log` | Read timeline events for one sub-agent run |
+| `subagents_retry_announces` | Retry pending completion announcements for control chats |
 | `activate_skill` | Activate an agent skill to load specialized instructions |
 | `sync_skills` | Sync a skill from external registry (e.g. vercel-labs/skills) and normalize local frontmatter |
 | `todo_read` | Read the current task/plan list for a chat |
@@ -586,6 +595,22 @@ Synchronous response (`/api/send` or `/api/chat`):
 }
 ```
 
+Async streaming response (`/api/send_stream` or `/api/chat_stream`):
+```json
+{
+  "ok": true,
+  "run_id": "6f4c2b1d-...",
+  "session_key": "ops-bot",
+  "chat_id": 123
+}
+```
+
+Consume SSE events:
+```sh
+curl -N "http://127.0.0.1:10961/api/stream?run_id=<RUN_ID>" \
+  -H "Authorization: Bearer $MICROCLAW_API_KEY"
+```
+
 Example:
 ```sh
 curl -sS http://127.0.0.1:10961/api/chat \
@@ -859,6 +884,16 @@ Notes:
 - Gateway service stdout/stderr files are `microclaw-gateway.log` and `microclaw-gateway.error.log`.
 - Logs older than 30 days are deleted automatically.
 
+### 6. Run as an ACP stdio server (optional)
+
+MicroClaw can also expose an Agent Client Protocol server over stdio:
+
+```sh
+microclaw acp
+```
+
+Use this mode when another local tool wants to talk to MicroClaw as a sessioned chat runtime over stdio instead of through Telegram, Discord, or the Web UI.
+
 ## Configuration
 
 All configuration is via `microclaw.config.yaml`:
@@ -906,6 +941,15 @@ All configuration is via `microclaw.config.yaml`:
 | `max_tool_iterations` | No | `100` | Max tool-use loop iterations per message |
 | `max_document_size_mb` | No | `100` | Maximum allowed size for inbound Telegram documents; larger files are rejected with a hint message |
 | `memory_token_budget` | No | `1500` | Estimated token budget for injecting structured memories into prompt context |
+| `subagents.max_concurrent` | No | `4` | Maximum number of active sub-agent runs across the runtime |
+| `subagents.max_active_per_chat` | No | `5` | Maximum number of active sub-agent runs allowed per chat |
+| `subagents.run_timeout_secs` | No | `900` | Timeout for a single sub-agent run |
+| `subagents.max_spawn_depth` | No | `1` | Maximum recursive sub-agent depth |
+| `subagents.max_children_per_run` | No | `5` | Maximum number of child runs created from one parent run |
+| `subagents.max_tokens_per_run` | No | `120000` | Per-run token budget ceiling used by `sessions_spawn` and `subagents_orchestrate` |
+| `subagents.orchestrate_max_workers` | No | `5` | Worker cap for `subagents_orchestrate` fan-out |
+| `subagents.announce_to_chat` | No | `true` | Post sub-agent completion notices back into the parent chat |
+| `subagents.thread_bound_routing_enabled` | No | `true` | Route thread replies to the currently focused sub-agent when supported by the channel |
 | `max_history_messages` | No | `50` | Number of recent messages sent as context |
 | `control_chat_ids` | No | `[]` | Chat IDs that can perform cross-chat actions (send_message/schedule/export/memory global/todo) |
 | `max_session_messages` | No | `40` | Message count threshold that triggers context compaction |
@@ -1163,6 +1207,8 @@ MicroClaw's core loop is channel-agnostic. A new platform integration should mai
 | [README.md](README.md) | This file -- overview, setup, usage |
 | [DEVELOP.md](DEVELOP.md) | Developer guide -- architecture, adding tools, debugging |
 | [TEST.md](TEST.md) | Manual testing guide for all features |
+| [docs/operations/acp-stdio.md](docs/operations/acp-stdio.md) | ACP stdio mode overview and verification steps |
+| [docs/operations/http-hook-trigger.md](docs/operations/http-hook-trigger.md) | Webhook and async streaming trigger behavior |
 | [CLAUDE.md](CLAUDE.md) | Project context for AI coding assistants |
 | [AGENTS.md](AGENTS.md) | Agent-friendly project reference |
 
