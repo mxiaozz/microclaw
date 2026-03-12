@@ -2843,6 +2843,20 @@ impl SetupApp {
         {
             refs.push("discord channel".to_string());
         }
+        for slot in 1..=MAX_BOT_SLOTS {
+            if self
+                .field_value(&telegram_slot_model_key(slot))
+                .eq_ignore_ascii_case(needle)
+            {
+                let id = self.field_value(&telegram_slot_id_key(slot));
+                let label = if id.trim().is_empty() {
+                    format!("telegram.bot{slot}")
+                } else {
+                    format!("telegram.{}", id.trim())
+                };
+                refs.push(label);
+            }
+        }
         for ch in DYNAMIC_CHANNELS {
             for slot in 1..=MAX_BOT_SLOTS {
                 let key = dynamic_slot_llm_provider_key(ch.name, slot);
@@ -2913,6 +2927,9 @@ impl SetupApp {
         };
         maybe_replace(telegram_llm_provider_key(), self);
         maybe_replace(discord_llm_provider_key(), self);
+        for slot in 1..=MAX_BOT_SLOTS {
+            maybe_replace(&telegram_slot_model_key(slot), self);
+        }
         for ch in DYNAMIC_CHANNELS {
             for slot in 1..=MAX_BOT_SLOTS {
                 let key = dynamic_slot_llm_provider_key(ch.name, slot);
@@ -8472,11 +8489,14 @@ subagents:
     fn test_provider_preset_references_collect_channel_and_dynamic_slots() {
         let mut app = SetupApp::new();
         app.set_field_value(telegram_llm_provider_key(), "1".into());
+        app.set_field_value(&telegram_slot_id_key(2), "bot2".into());
+        app.set_field_value(&telegram_slot_model_key(2), "1".into());
         app.set_field_value(&dynamic_slot_llm_provider_key("slack", 1), "1".into());
         app.set_field_value(&dynamic_slot_id_field_key("slack", 1), "sales".into());
 
         let refs = app.provider_preset_references("1");
         assert!(refs.iter().any(|v| v == "telegram channel"));
+        assert!(refs.iter().any(|v| v == "telegram.bot2"));
         assert!(refs.iter().any(|v| v == "slack.sales"));
     }
 
@@ -8484,6 +8504,8 @@ subagents:
     fn test_renaming_provider_preset_updates_references() {
         let mut app = SetupApp::new();
         app.set_field_value(telegram_llm_provider_key(), "1".into());
+        app.set_field_value(&telegram_slot_id_key(2), "bot2".into());
+        app.set_field_value(&telegram_slot_model_key(2), "1".into());
         app.set_field_value(&dynamic_slot_llm_provider_key("slack", 1), "1".into());
         app.set_field_value(&dynamic_slot_id_field_key("slack", 1), "sales".into());
         app.provider_preset_page = Some(ProviderPresetPage {
@@ -8506,12 +8528,14 @@ subagents:
         app.set_provider_preset_selected_field_value("2".into());
 
         assert_eq!(app.field_value(telegram_llm_provider_key()), "2");
+        assert_eq!(app.field_value(&telegram_slot_model_key(2)), "2");
         assert_eq!(
             app.field_value(&dynamic_slot_llm_provider_key("slack", 1)),
             "2"
         );
         let refs = app.provider_preset_references("2");
         assert!(refs.iter().any(|v| v == "telegram channel"));
+        assert!(refs.iter().any(|v| v == "telegram.bot2"));
         assert!(refs.iter().any(|v| v == "slack.sales"));
     }
 

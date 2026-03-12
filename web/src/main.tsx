@@ -648,6 +648,90 @@ function providerProfileOptions(entries: ProviderProfileDraft[], currentRaw: unk
   return options
 }
 
+function providerProfileReferences(configDraft: Record<string, unknown>, profileIdRaw: unknown): string[] {
+  const profileId = String(profileIdRaw || '').trim()
+  if (!profileId) return []
+  const refs: string[] = []
+
+  if (String(configDraft.telegram_provider_preset || '').trim().toLowerCase() === profileId.toLowerCase()) {
+    refs.push('telegram channel')
+  }
+
+  for (let slot = 1; slot <= normalizeBotCount(configDraft.telegram_bot_count || 1); slot += 1) {
+    if (String(configDraft[`telegram_bot_${slot}_provider_preset`] || '').trim().toLowerCase() === profileId.toLowerCase()) {
+      const accountId = normalizeAccountId(configDraft[`telegram_bot_${slot}_account_id`] || defaultTelegramAccountIdForSlot(slot))
+      refs.push(`telegram.${accountId}`)
+    }
+  }
+
+  for (let slot = 1; slot <= normalizeBotCount(configDraft.discord_bot_count || 1); slot += 1) {
+    if (String(configDraft[`discord_bot_${slot}_provider_preset`] || '').trim().toLowerCase() === profileId.toLowerCase()) {
+      const accountId = normalizeAccountId(configDraft[`discord_bot_${slot}_account_id`] || defaultAccountIdForSlot(slot))
+      refs.push(`discord.${accountId}`)
+    }
+  }
+
+  if (String(configDraft.irc_provider_preset || '').trim().toLowerCase() === profileId.toLowerCase()) {
+    refs.push('irc channel')
+  }
+
+  for (const ch of DYNAMIC_CHANNELS) {
+    for (let slot = 1; slot <= normalizeBotCount(configDraft[`${ch.name}__bot_count`] || 1); slot += 1) {
+      const stateKey = `${ch.name}__bot_${slot}__provider_preset`
+      if (String(configDraft[stateKey] || '').trim().toLowerCase() === profileId.toLowerCase()) {
+        const accountId = normalizeAccountId(configDraft[`${ch.name}__bot_${slot}__account_id`] || defaultAccountIdForSlot(slot))
+        refs.push(`${ch.name}.${accountId}`)
+      }
+    }
+  }
+
+  return Array.from(new Set(refs)).sort((a, b) => a.localeCompare(b))
+}
+
+function renameProviderProfileReferences(
+  configDraft: Record<string, unknown>,
+  oldIdRaw: unknown,
+  newIdRaw: unknown,
+): Record<string, unknown> {
+  const oldId = String(oldIdRaw || '').trim()
+  const newId = String(newIdRaw || '').trim()
+  if (!oldId || oldId.toLowerCase() === newId.toLowerCase()) return configDraft
+
+  const next: Record<string, unknown> = { ...configDraft }
+  const maybeReplace = (key: string): void => {
+    if (String(next[key] || '').trim().toLowerCase() === oldId.toLowerCase()) {
+      next[key] = newId
+    }
+  }
+
+  maybeReplace('telegram_provider_preset')
+  for (let slot = 1; slot <= BOT_SLOT_MAX; slot += 1) {
+    maybeReplace(`telegram_bot_${slot}_provider_preset`)
+    maybeReplace(`discord_bot_${slot}_provider_preset`)
+  }
+  maybeReplace('irc_provider_preset')
+  for (const ch of DYNAMIC_CHANNELS) {
+    for (let slot = 1; slot <= BOT_SLOT_MAX; slot += 1) {
+      maybeReplace(`${ch.name}__bot_${slot}__provider_preset`)
+    }
+  }
+  return next
+}
+
+function resetProviderProfileReferencesToMain(
+  configDraft: Record<string, unknown>,
+  profileIdRaw: unknown,
+): { nextDraft: Record<string, unknown>; resetRefs: string[] } {
+  const profileId = String(profileIdRaw || '').trim()
+  if (!profileId) return { nextDraft: configDraft, resetRefs: [] }
+
+  const refs = providerProfileReferences(configDraft, profileId)
+  if (refs.length === 0) return { nextDraft: configDraft, resetRefs: [] }
+
+  const next = renameProviderProfileReferences(configDraft, profileId, '')
+  return { nextDraft: next, resetRefs: refs }
+}
+
 function defaultModelForProvider(providerRaw: string): string {
   const provider = providerRaw.trim().toLowerCase()
   if (provider === 'anthropic') return 'claude-sonnet-4-5-20250929'
@@ -2232,8 +2316,13 @@ function App() {
         ? [...(prev.provider_profiles as ProviderProfileDraft[])]
         : []
       if (!entries[index]) return prev
+      const oldId = String(entries[index].id || '').trim()
       entries[index] = { ...entries[index], ...patch }
-      return { ...prev, provider_profiles: entries }
+      const nextDraft = { ...prev, provider_profiles: entries }
+      if (Object.prototype.hasOwnProperty.call(patch, 'id')) {
+        return renameProviderProfileReferences(nextDraft, oldId, entries[index].id)
+      }
+      return nextDraft
     })
   }
 
@@ -2267,8 +2356,28 @@ function App() {
       const entries = Array.isArray(prev.provider_profiles)
         ? [...(prev.provider_profiles as ProviderProfileDraft[])]
         : []
+      const target = entries[index]
+      if (!target) return prev
+      const refs = providerProfileReferences(prev, target.id)
+      if (refs.length > 0) return prev
       entries.splice(index, 1)
       return { ...prev, provider_profiles: entries }
+    })
+  }
+
+  function resetRefsAndRemoveProviderProfile(index: number): void {
+    setConfigDraft((prev) => {
+      const entries = Array.isArray(prev.provider_profiles)
+        ? [...(prev.provider_profiles as ProviderProfileDraft[])]
+        : []
+      const target = entries[index]
+      if (!target) return prev
+      const { nextDraft } = resetProviderProfileReferencesToMain(prev, target.id)
+      const nextEntries = Array.isArray(nextDraft.provider_profiles)
+        ? [...(nextDraft.provider_profiles as ProviderProfileDraft[])]
+        : entries
+      nextEntries.splice(index, 1)
+      return { ...nextDraft, provider_profiles: nextEntries }
     })
   }
 
@@ -3573,16 +3682,31 @@ function App() {
                               </Card>
                             ) : providerProfileDrafts.map((entry, index) => (
                               <Card key={`provider-profile-${index}`} className="p-3">
+                                {(() => {
+                                  const refs = providerProfileReferences(configDraft, entry.id)
+                                  const inUse = refs.length > 0
+                                  return (
+                                    <>
                                 <Flex align="center" justify="between" gap="3">
                                   <div>
                                     <Text size="2" weight="medium">{entry.id || `Profile #${index + 1}`}</Text>
                                     <Text size="1" color="gray" className="mt-1 block">
                                       {entry.provider || 'custom'} / {entry.default_model || '(no model)'}
                                     </Text>
+                                    <Text size="1" color={inUse ? 'amber' : 'gray'} className="mt-1 block">
+                                      {inUse ? `${refs.length} ref(s) · ${refs.join(', ')}` : 'unused'}
+                                    </Text>
                                   </div>
                                   <Flex gap="2">
                                     <Button variant="soft" onClick={() => cloneProviderProfile(index)}>Clone</Button>
-                                    <Button variant="soft" color="red" onClick={() => removeProviderProfile(index)}>Delete</Button>
+                                    {inUse ? (
+                                      <Button variant="soft" color="amber" onClick={() => resetRefsAndRemoveProviderProfile(index)}>
+                                        Reset refs + delete
+                                      </Button>
+                                    ) : null}
+                                    <Button variant="soft" color="red" disabled={inUse} onClick={() => removeProviderProfile(index)}>
+                                      Delete
+                                    </Button>
                                   </Flex>
                                 </Flex>
                                 <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-2">
@@ -3657,6 +3781,9 @@ function App() {
                                     style={toggleCardStyle}
                                   />
                                 </div>
+                                    </>
+                                  )
+                                })()}
                               </Card>
                             ))}
                           </div>
