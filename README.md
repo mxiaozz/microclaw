@@ -943,7 +943,8 @@ All configuration is via `microclaw.config.yaml`:
 | `channels.telegram.default_account` | No | unset | Default Telegram account ID in multi-account mode |
 | `channels.telegram.accounts.<id>.bot_token` | No* | unset | Telegram bot token for a specific account (recommended multi-account mode) |
 | `channels.telegram.accounts.<id>.bot_username` | No | unset | Telegram username for a specific account (without `@`) |
-| `channels.telegram.accounts.<id>.model` | No | unset | Optional per-bot model override for that Telegram account |
+| `channels.telegram.provider_preset` | No | unset | Optional Telegram channel-level provider profile override |
+| `channels.telegram.accounts.<id>.provider_preset` | No | unset | Optional per-bot provider profile override for that Telegram account |
 | `channels.telegram.accounts.<id>.soul_path` | No | unset | Optional per-bot SOUL file path for this Telegram account |
 | `channels.telegram.topic_routing.enabled` | No | `false` | If true, Telegram topics are routed as separate chats using `external_chat_id=<chat_id>:<thread_id>` |
 | `channels.telegram.accounts.<id>.topic_routing.enabled` | No | inherit channel-level | Optional per-account override for Telegram topic routing |
@@ -955,14 +956,16 @@ All configuration is via `microclaw.config.yaml`:
 | `channels.discord.accounts.<id>.bot_token` | No* | unset | Discord bot token for a specific account |
 | `channels.discord.accounts.<id>.allowed_channels` | No | `[]` | Optional Discord channel allowlist scoped to one account |
 | `channels.discord.accounts.<id>.no_mention` | No | `false` | If true, that Discord account responds in guild channels without @mention |
-| `channels.discord.accounts.<id>.model` | No | unset | Optional per-bot model override for that Discord account |
+| `channels.discord.provider_preset` | No | unset | Optional Discord channel-level provider profile override |
+| `channels.discord.accounts.<id>.provider_preset` | No | unset | Optional per-bot provider profile override for that Discord account |
 | `channels.discord.accounts.<id>.soul_path` | No | unset | Optional per-bot SOUL file path for this Discord account |
 | `allow_group_slash_without_mention` | No | `false` | If true, allow slash commands in group/server/channel chats without @mention |
 | `discord_allowed_channels` | No | `[]` | Discord channel ID allowlist; empty means no channel restriction |
 | `api_key` | Yes* | -- | LLM API key (`ollama` can leave this empty; `openai-codex` supports OAuth or `api_key`) |
 | `bot_username` | No | -- | Telegram bot username (without @; needed for Telegram group mentions) |
-| `llm_provider` | No | `anthropic` | Provider preset ID (or custom ID). `anthropic` uses native Anthropic API, others use OpenAI-compatible API |
+| `llm_provider` | No | `anthropic` | Global main LLM provider profile. Built-ins include `anthropic`, `openai`, `google`, `aliyun-bailian`, `nvidia`, `openrouter`, `ollama`, and `custom` |
 | `model` | No | provider-specific | Model name |
+| `provider_presets.<id>` | No | `{}` | Optional reusable provider profiles for channel/bot overrides. Each profile can define provider, api key, base URL, user-agent, model, and show-thinking |
 | `model_prices` | No | `[]` | Optional per-model pricing table (USD per 1M tokens) used by `/usage` cost estimates |
 | `llm_base_url` | No | provider preset default | Custom provider base URL |
 | `openai_compat_body_overrides` | No | `{}` | Global request-body overrides for OpenAI-compatible providers (`openai`, `openrouter`, `deepseek`, `ollama`, etc.) |
@@ -1122,7 +1125,7 @@ Notes:
 
 ### Supported `llm_provider` values
 
-`openai`, `openai-codex`, `openrouter`, `anthropic`, `ollama`, `google`, `alibaba`, `deepseek`, `moonshot`, `mistral`, `azure`, `bedrock`, `zhipu`, `minimax`, `cohere`, `tencent`, `xai`, `huggingface`, `together`, `custom`.
+`openai`, `openai-codex`, `openrouter`, `anthropic`, `ollama`, `google`, `alibaba`, `aliyun-bailian`, `nvidia`, `deepseek`, `moonshot`, `mistral`, `azure`, `bedrock`, `zhipu`, `minimax`, `cohere`, `tencent`, `xai`, `huggingface`, `together`, `custom`.
 
 ## Platform behavior
 

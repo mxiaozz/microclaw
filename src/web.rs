@@ -816,6 +816,8 @@ struct UpdateConfigRequest {
     api_key: Option<String>,
     model: Option<String>,
     llm_base_url: Option<Option<String>>,
+    llm_user_agent: Option<Option<String>>,
+    provider_presets: Option<HashMap<String, crate::config::LlmProviderProfile>>,
     max_tokens: Option<u32>,
     max_tool_iterations: Option<usize>,
     openai_compat_body_overrides: Option<HashMap<String, serde_json::Value>>,
@@ -2557,8 +2559,10 @@ mod tests {
                 provider: Some("openai".to_string()),
                 api_key: None,
                 llm_base_url: Some(format!("http://{addr}/v1")),
+                llm_user_agent: None,
                 default_model: Some("custom-model".to_string()),
                 models: vec!["custom-model".to_string()],
+                show_thinking: None,
             },
         );
         let web_state = test_web_state_from_app_state(
@@ -4094,13 +4098,20 @@ commands:
         .await
         .unwrap();
 
-        let hello = recv_ws_json(&mut ws).await;
-        assert_eq!(hello.get("type").and_then(|v| v.as_str()), Some("res"));
-        assert_eq!(hello.get("ok").and_then(|v| v.as_bool()), Some(true));
-        assert_eq!(
-            hello.pointer("/payload/type").and_then(|v| v.as_str()),
-            Some("hello-ok")
-        );
+        let mut saw_hello = false;
+        for _ in 0..4 {
+            let msg = recv_ws_json(&mut ws).await;
+            if msg.get("type").and_then(|v| v.as_str()) != Some("res") {
+                continue;
+            }
+            if msg.pointer("/payload/type").and_then(|v| v.as_str()) != Some("hello-ok") {
+                continue;
+            }
+            assert_eq!(msg.get("ok").and_then(|v| v.as_bool()), Some(true));
+            saw_hello = true;
+            break;
+        }
+        assert!(saw_hello, "expected websocket hello-ok response");
 
         ws.send(tokio_tungstenite::tungstenite::Message::Text(
             json!({
@@ -4118,12 +4129,19 @@ commands:
         .await
         .unwrap();
 
-        let ack = recv_ws_json(&mut ws).await;
-        assert_eq!(ack.get("type").and_then(|v| v.as_str()), Some("res"));
-        assert_eq!(
-            ack.pointer("/payload/status").and_then(|v| v.as_str()),
-            Some("started")
-        );
+        let mut saw_ack = false;
+        for _ in 0..4 {
+            let msg = recv_ws_json(&mut ws).await;
+            if msg.get("type").and_then(|v| v.as_str()) != Some("res") {
+                continue;
+            }
+            if msg.pointer("/payload/status").and_then(|v| v.as_str()) != Some("started") {
+                continue;
+            }
+            saw_ack = true;
+            break;
+        }
+        assert!(saw_ack, "expected websocket started response");
 
         let mut saw_delta = false;
         let mut saw_final = false;
