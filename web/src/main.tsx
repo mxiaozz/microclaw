@@ -660,6 +660,9 @@ function providerProfileReferences(configDraft: Record<string, unknown>, profile
   if (String(configDraft.telegram_provider_preset || '').trim().toLowerCase() === profileId.toLowerCase()) {
     refs.push('telegram channel')
   }
+  if (String(configDraft.discord_provider_preset || '').trim().toLowerCase() === profileId.toLowerCase()) {
+    refs.push('discord channel')
+  }
 
   for (let slot = 1; slot <= normalizeBotCount(configDraft.telegram_bot_count || 1); slot += 1) {
     if (String(configDraft[`telegram_bot_${slot}_provider_preset`] || '').trim().toLowerCase() === profileId.toLowerCase()) {
@@ -709,6 +712,7 @@ function renameProviderProfileReferences(
   }
 
   maybeReplace('telegram_provider_preset')
+  maybeReplace('discord_provider_preset')
   for (let slot = 1; slot <= BOT_SLOT_MAX; slot += 1) {
     maybeReplace(`telegram_bot_${slot}_provider_preset`)
     maybeReplace(`discord_bot_${slot}_provider_preset`)
@@ -2161,6 +2165,8 @@ function App() {
         ...telegramBotDraft,
         discord_account_id: discordDefaultAccount,
         discord_bot_count: discordBotCount,
+        discord_provider_preset:
+          providerPresetFromConfigValue(discordCfg) || providerPresetFromConfigValue(discordAccounts[0]?.[1] || {}),
         ...discordBotDraft,
         irc_server: String(ircCfg.server || ''),
         irc_port: String(ircCfg.port || ''),
@@ -2459,6 +2465,9 @@ function App() {
         case 'discord_account_id':
           next.discord_account_id = 'main'
           break
+        case 'discord_provider_preset':
+          next.discord_provider_preset = ''
+          break
         case 'discord_bot_count':
           next.discord_bot_count = 1
           for (let slot = 1; slot <= BOT_SLOT_MAX; slot += 1) {
@@ -2730,6 +2739,7 @@ function App() {
       }
 
       const discordAccountId = normalizeAccountId(configDraft.discord_account_id)
+      const discordProviderPreset = String(configDraft.discord_provider_preset || '').trim()
       const discordBotCount = normalizeBotCount(configDraft.discord_bot_count)
       const discordAccounts: Record<string, unknown> = {}
       for (let slot = 1; slot <= discordBotCount; slot += 1) {
@@ -2830,6 +2840,7 @@ function App() {
       if (Object.keys(discordAccounts).length > 0) {
         channelConfigs.discord = {
           default_account: discordAccountId,
+          ...(discordProviderPreset ? { provider_preset: discordProviderPreset } : {}),
           accounts: discordAccounts,
         }
       }
@@ -3602,7 +3613,20 @@ function App() {
                         <Text size="1" color="gray" className="mt-2 block">Global LLM config acts like the main profile. Channel and bot overrides should select a provider profile instead of overriding model directly.</Text>
                         <Text size="1" color="gray" className="mt-1 block">For custom providers set <code>llm_base_url</code>. For <code>openai-codex</code>, configure auth/provider in <code>~/.codex/auth.json</code> and <code>~/.codex/config.toml</code> (this form ignores <code>api_key</code>/<code>llm_base_url</code>). <code>ollama</code> can leave <code>api_key</code> empty.</Text>
                         <div className="mt-4 space-y-3">
-                          <ConfigFieldCard label="llm_provider" description={<>Select the global main provider backend.</>}>
+                          <ConfigFieldCard
+                            label="llm_provider"
+                            description={
+                              <>
+                                Select the global main provider backend.
+                                {currentProvider === 'openrouter' ? (
+                                  <> Browse models: <a href="https://openrouter.ai/models" target="_blank" rel="noreferrer">openrouter.ai/models</a>.</>
+                                ) : null}
+                                {currentProvider === 'nvidia' ? (
+                                  <> Browse models: <a href="https://build.nvidia.com/models" target="_blank" rel="noreferrer">build.nvidia.com/models</a>.</>
+                                ) : null}
+                              </>
+                            }
+                          >
                             <div className="mt-2">
                               <Select.Root
                                 value={String(configDraft.llm_provider || DEFAULT_CONFIG_VALUES.llm_provider)}
@@ -4017,6 +4041,23 @@ function App() {
                               value={String(configDraft.discord_bot_count || 1)}
                               onChange={(e) => setConfigField('discord_bot_count', normalizeBotCount(e.target.value))}
                             />
+                          </ConfigFieldCard>
+                          <ConfigFieldCard label="discord_provider_preset" description={<>Optional Discord channel-level LLM provider profile override.</>}>
+                            <div className="mt-2">
+                              <Select.Root
+                                value={String(configDraft.discord_provider_preset || '') || MAIN_PROFILE_VALUE}
+                                onValueChange={(value) => setConfigField('discord_provider_preset', value === MAIN_PROFILE_VALUE ? '' : value)}
+                              >
+                                <Select.Trigger className="w-full mc-select-trigger-full" placeholder="Select provider profile" />
+                                <Select.Content>
+                                  {providerProfileOptions(providerProfileDrafts, configDraft.discord_provider_preset).map((option) => (
+                                    <Select.Item key={`discord-provider-preset-${option.value}`} value={option.value}>
+                                      {option.label}
+                                    </Select.Item>
+                                  ))}
+                                </Select.Content>
+                              </Select.Root>
+                            </div>
                           </ConfigFieldCard>
                           {Array.from({ length: normalizeBotCount(configDraft.discord_bot_count || 1) }).map((_, idx) => {
                             const slot = idx + 1
