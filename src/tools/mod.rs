@@ -741,7 +741,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_high_risk_tool_confirmation_flag_false_hard_disables_control_chat_approval_gate() {
+    async fn test_high_risk_tool_confirmation_flag_false_hard_disables_control_chat_approval_gate()
+    {
         let mut config = crate::config::Config::test_defaults();
         config.high_risk_tool_user_confirmation_required = false;
         let registry = ToolRegistry {

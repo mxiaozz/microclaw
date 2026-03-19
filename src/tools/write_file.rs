@@ -121,7 +121,9 @@ mod tests {
             .contains("Prefer paths relative to the current chat working directory"));
         assert_eq!(
             def.input_schema["properties"]["path"]["description"].as_str(),
-            Some("The file path to write to, usually relative to the current chat working directory")
+            Some(
+                "The file path to write to, usually relative to the current chat working directory"
+            )
         );
     }
 

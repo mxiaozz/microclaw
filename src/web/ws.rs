@@ -1372,7 +1372,9 @@ mod tests {
         assert!(is_expected_closed_socket_error(
             "WebSocket protocol error: Sending after closing is not allowed"
         ));
-        assert!(is_expected_closed_socket_error("connection closed normally"));
+        assert!(is_expected_closed_socket_error(
+            "connection closed normally"
+        ));
         assert!(!is_expected_closed_socket_error("tls handshake failed"));
     }
 }
