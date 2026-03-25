@@ -3,7 +3,9 @@ use serde_json::Value;
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::{debug, info, warn};
 
-use crate::config::ResolvedLlmProviderProfile;
+use crate::config::{
+    normalize_model_name, resolve_model_name_with_fallback, ResolvedLlmProviderProfile,
+};
 use crate::hooks::HookOutcome;
 use crate::memory_service::{build_db_memory_context, maybe_handle_explicit_memory_command};
 use crate::run_control;
@@ -288,13 +290,25 @@ async fn resolve_effective_provider_and_model(
                 .resolve_llm_provider_profile(&state.config.llm_provider)
         })
         .expect("default llm provider profile should always resolve");
-    let effective_model = {
+    let raw_model_override = {
         let overrides = state.llm_model_overrides.read().await;
-        overrides
-            .get(caller_channel)
-            .cloned()
-            .unwrap_or_else(|| profile.default_model.clone())
+        overrides.get(caller_channel).cloned()
     };
+    if raw_model_override
+        .as_deref()
+        .is_some_and(|model| normalize_model_name(model).is_none())
+    {
+        warn!(
+            "Ignoring invalid model override '{}' for channel '{}'",
+            raw_model_override.as_deref().unwrap_or_default(),
+            caller_channel
+        );
+    }
+    let effective_model = resolve_model_name_with_fallback(
+        &profile.provider,
+        raw_model_override.as_deref(),
+        Some(&profile.default_model),
+    );
     let session_settings = call_blocking(state.db.clone(), move |db| {
         db.load_session_settings(chat_id)
     })

@@ -29,6 +29,7 @@ use crate::channels::{
     MatrixAdapter, NostrAdapter, QQAdapter, SignalAdapter, SlackAdapter, TelegramAdapter,
     WeixinAdapter, WhatsAppAdapter,
 };
+use crate::config::normalize_model_name;
 use crate::config::Config;
 use crate::embedding::EmbeddingProvider;
 use crate::hooks::HookManager;
@@ -83,7 +84,14 @@ where
     let runtimes = build(config);
     for runtime in &runtimes {
         if let Some((channel_name, model)) = model_override(runtime) {
-            llm_model_overrides.insert(channel_name, model);
+            if let Some(model) = normalize_model_name(&model) {
+                llm_model_overrides.insert(channel_name, model);
+            } else {
+                warn!(
+                    "Ignoring invalid model override '{}' for channel '{}'",
+                    model, channel_name
+                );
+            }
         }
         register(runtime, registry);
     }

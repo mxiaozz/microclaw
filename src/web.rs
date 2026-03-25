@@ -960,6 +960,50 @@ fn json_to_yaml_value(v: &serde_json::Value) -> serde_yaml::Value {
     }
 }
 
+fn yaml_key_to_json_field(key: &serde_yaml::Value) -> String {
+    match key {
+        serde_yaml::Value::Null => "null".to_string(),
+        serde_yaml::Value::Bool(value) => value.to_string(),
+        serde_yaml::Value::Number(value) => value.to_string(),
+        serde_yaml::Value::String(value) => value.clone(),
+        other => serde_yaml::to_string(other)
+            .map(|raw| raw.trim().to_string())
+            .unwrap_or_else(|_| "<non-string-key>".to_string()),
+    }
+}
+
+fn yaml_to_json_value(value: &serde_yaml::Value) -> serde_json::Value {
+    match value {
+        serde_yaml::Value::Null => serde_json::Value::Null,
+        serde_yaml::Value::Bool(value) => serde_json::Value::Bool(*value),
+        serde_yaml::Value::Number(value) => {
+            if let Some(i) = value.as_i64() {
+                serde_json::Value::Number(i.into())
+            } else if let Some(u) = value.as_u64() {
+                serde_json::Value::Number(u.into())
+            } else if let Some(f) = value.as_f64() {
+                serde_json::Number::from_f64(f)
+                    .map(serde_json::Value::Number)
+                    .unwrap_or(serde_json::Value::Null)
+            } else {
+                serde_json::Value::Null
+            }
+        }
+        serde_yaml::Value::String(value) => serde_json::Value::String(value.clone()),
+        serde_yaml::Value::Sequence(items) => {
+            serde_json::Value::Array(items.iter().map(yaml_to_json_value).collect())
+        }
+        serde_yaml::Value::Mapping(map) => {
+            let mut json_map = serde_json::Map::with_capacity(map.len());
+            for (key, value) in map {
+                json_map.insert(yaml_key_to_json_field(key), yaml_to_json_value(value));
+            }
+            serde_json::Value::Object(json_map)
+        }
+        serde_yaml::Value::Tagged(tagged) => yaml_to_json_value(&tagged.value),
+    }
+}
+
 fn config_path_for_save() -> Result<PathBuf, (StatusCode, String)> {
     match Config::resolve_config_path() {
         Ok(Some(path)) => Ok(path),
@@ -1027,7 +1071,9 @@ fn redact_json_secrets(value: &mut serde_json::Value, parent_key: Option<&str>) 
 }
 
 fn redact_config(config: &Config) -> serde_json::Value {
-    let mut value = json!(config);
+    let mut value = serde_yaml::to_value(config)
+        .map(|yaml| yaml_to_json_value(&yaml))
+        .unwrap_or_else(|_| json!({}));
     redact_json_secrets(&mut value, None);
     value
 }
@@ -4199,6 +4245,33 @@ commands:
         assert_eq!(
             redacted.get("max_tokens").and_then(|v| v.as_u64()),
             Some(cfg.max_tokens as u64)
+        );
+    }
+
+    #[test]
+    fn test_redact_config_handles_non_string_yaml_mapping_keys() {
+        let mut cfg = test_config_template();
+        let mut inner = serde_yaml::Mapping::new();
+        inner.insert(
+            serde_yaml::Value::String("bot_token".to_string()),
+            serde_yaml::Value::String("discord-secret-token".to_string()),
+        );
+
+        let mut outer = serde_yaml::Mapping::new();
+        outer.insert(
+            serde_yaml::Value::Number(42_i64.into()),
+            serde_yaml::Value::Mapping(inner),
+        );
+
+        cfg.channels
+            .insert("discord".to_string(), serde_yaml::Value::Mapping(outer));
+
+        let redacted = redact_config(&cfg);
+        assert_eq!(
+            redacted
+                .pointer("/channels/discord/42/bot_token")
+                .and_then(|v| v.as_str()),
+            Some("***")
         );
     }
 

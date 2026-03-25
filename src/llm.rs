@@ -14,9 +14,9 @@ use crate::codex_auth::{
     codex_config_default_openai_base_url, is_openai_codex_provider, is_qwen_portal_provider,
     refresh_openai_codex_auth_if_needed, resolve_openai_codex_auth, resolve_qwen_portal_auth,
 };
-use crate::config::Config;
 #[cfg(test)]
 use crate::config::WorkingDirIsolation;
+use crate::config::{resolve_model_name_with_fallback, Config};
 use crate::http_client::llm_user_agent;
 use microclaw_core::error::MicroClawError;
 use microclaw_core::llm_types::{
@@ -912,13 +912,10 @@ impl LlmProvider for AnthropicProvider {
         model_override: Option<&str>,
     ) -> Result<MessagesResponse, MicroClawError> {
         let messages = sanitize_messages(messages);
-        let model = model_override
-            .map(str::trim)
-            .filter(|v| !v.is_empty())
-            .unwrap_or(&self.model);
+        let model = resolve_request_model("anthropic", &self.model, model_override);
 
         let request = MessagesRequest {
-            model: model.to_string(),
+            model,
             max_tokens: self.max_tokens,
             system: system.to_string(),
             messages,
@@ -992,12 +989,9 @@ impl LlmProvider for AnthropicProvider {
         model_override: Option<&str>,
     ) -> Result<MessagesResponse, MicroClawError> {
         let messages = sanitize_messages(messages);
-        let model = model_override
-            .map(str::trim)
-            .filter(|v| !v.is_empty())
-            .unwrap_or(&self.model);
+        let model = resolve_request_model("anthropic", &self.model, model_override);
         let request = MessagesRequest {
-            model: model.to_string(),
+            model,
             max_tokens: self.max_tokens,
             system: system.to_string(),
             messages,
@@ -1198,6 +1192,14 @@ fn apply_openai_compat_body_overrides(
     apply_body_override_map(body, Some(global));
     apply_body_override_map(body, by_provider.get(&provider.to_ascii_lowercase()));
     apply_body_override_map(body, by_model.get(model));
+}
+
+fn resolve_request_model(
+    provider: &str,
+    configured_model: &str,
+    model_override: Option<&str>,
+) -> String {
+    resolve_model_name_with_fallback(provider, model_override, Some(configured_model))
 }
 
 fn has_visible_reply_runtime_guard(messages: &[Message]) -> bool {
@@ -1438,13 +1440,10 @@ impl LlmProvider for OpenAiProvider {
         tools: Option<Vec<ToolDefinition>>,
         model_override: Option<&str>,
     ) -> Result<MessagesResponse, MicroClawError> {
-        let model = model_override
-            .map(str::trim)
-            .filter(|v| !v.is_empty())
-            .unwrap_or(&self.model);
+        let model = resolve_request_model(&self.provider, &self.model, model_override);
         if self.is_openai_codex {
             return self
-                .send_codex_message(system, messages, tools, model)
+                .send_codex_message(system, messages, tools, &model)
                 .await;
         }
 
@@ -1559,13 +1558,10 @@ impl LlmProvider for OpenAiProvider {
         text_tx: Option<&UnboundedSender<String>>,
         model_override: Option<&str>,
     ) -> Result<MessagesResponse, MicroClawError> {
-        let model = model_override
-            .map(str::trim)
-            .filter(|v| !v.is_empty())
-            .unwrap_or(&self.model);
+        let model = resolve_request_model(&self.provider, &self.model, model_override);
         if self.is_openai_codex {
             let response = self
-                .send_codex_message(system, messages, tools, model)
+                .send_codex_message(system, messages, tools, &model)
                 .await?;
             if let Some(tx) = text_tx {
                 let text = response
