@@ -465,10 +465,8 @@ pub async fn run(
         db.clone(),
         memory_backend.clone(),
     );
-    #[cfg(feature = "mcp")]
     let mut tools = tools;
 
-    #[cfg(feature = "mcp")]
     for (server, tool_info) in mcp_manager.all_tools() {
         tools.add_tool(Box::new(crate::tools::mcp::McpTool::new(server, tool_info)));
     }

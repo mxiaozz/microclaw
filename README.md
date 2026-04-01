@@ -96,7 +96,7 @@ If you want a source build instead, jump to [Install](#install). If you want ope
 curl -fsSL https://microclaw.ai/install.sh | bash
 ```
 
-For the full variant (includes Matrix channel + MCP support):
+For the full variant (includes Matrix channel support):
 
 ```sh
 curl -fsSL https://microclaw.ai/install.sh | bash -s -- --full
@@ -108,7 +108,7 @@ curl -fsSL https://microclaw.ai/install.sh | bash -s -- --full
 iwr https://microclaw.ai/install.ps1 -UseBasicParsing | iex
 ```
 
-For the full variant on Windows:
+For the full variant (adds Matrix channel) on Windows:
 
 ```powershell
 & ([scriptblock]::Create((iwr https://microclaw.ai/install.ps1 -UseBasicParsing).Content)) -Full
@@ -164,8 +164,8 @@ iwr https://microclaw.ai/uninstall.ps1 -UseBasicParsing | iex
 
 ```sh
 brew tap microclaw/tap
-brew install microclaw          # default (lightweight)
-brew install microclaw-full     # full (Matrix + MCP)
+brew install microclaw          # default
+brew install microclaw-full     # full (adds Matrix channel)
 ```
 
 ### Docker image
@@ -238,7 +238,7 @@ Optional full build with heavier integrations enabled:
 cargo build --release --features full
 ```
 
-`full` currently enables `channel-matrix` and `mcp`. The default build includes all channels except Matrix and omits MCP to keep the release artifact smaller.
+`full` currently enables `channel-matrix`. The default build includes all channels except Matrix (including MCP support). The full build adds the Matrix SDK.
 
 Optional semantic-memory build (sqlite-vec disabled by default):
 
