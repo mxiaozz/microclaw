@@ -97,6 +97,11 @@ fn expand_path(path: &str) -> PathBuf {
 }
 
 fn default_data_root() -> PathBuf {
+    if std::env::var("SNAP").is_ok() {
+        if let Ok(snap_user_common) = std::env::var("SNAP_USER_COMMON") {
+            return PathBuf::from(snap_user_common);
+        }
+    }
     expand_path("~/.microclaw")
 }
 
@@ -1275,6 +1280,24 @@ impl Config {
 
     pub fn clawhub_lockfile_path(&self) -> PathBuf {
         self.data_root_dir().join("clawhub.lock.json")
+    }
+
+    pub fn config_path_for_setup() -> PathBuf {
+        if let Ok(custom) = std::env::var("MICROCLAW_CONFIG") {
+            return expand_path(&custom);
+        }
+        if std::path::Path::new("./microclaw.config.yaml").exists() {
+            return PathBuf::from("./microclaw.config.yaml");
+        }
+        if std::path::Path::new("./microclaw.config.yml").exists() {
+            return PathBuf::from("./microclaw.config.yml");
+        }
+        if std::env::var("SNAP").is_ok() {
+            if let Ok(snap_user_common) = std::env::var("SNAP_USER_COMMON") {
+                return PathBuf::from(snap_user_common).join("config.yaml");
+            }
+        }
+        PathBuf::from("microclaw.config.yaml")
     }
 
     pub fn resolve_config_path() -> Result<Option<PathBuf>, MicroClawError> {
